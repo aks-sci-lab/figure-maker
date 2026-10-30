@@ -31,6 +31,7 @@
 - AI 는 선생님 본인의 Claude API 키로 브라우저에서 Anthropic 에 바로 요청한다 (키는 선택 시 그 브라우저 localStorage 에만). 사이트에 키를 넣거나 서버를 두지 않는다. SDK 는 jsdelivr `@anthropic-ai/sdk@0.133.0/+esm` 로 버전 고정.
 - 내 PC 의 LM Studio(OpenAI 호환, 기본 `http://127.0.0.1:1234`)도 쓸 수 있다 (사용자 PC: Ryzen 7 8845HS·24GB, Gemma 4 12B). Gemma 를 위해 규칙을 system 이 아닌 첫 사용자 글에 넣고, JSON 스키마(`response_format`)를 거절하면 빼고 다시, 깨진 JSON 은 한 번 고쳐 쓰게 한다.
 - 비밀값(API 키)은 커밋하지 않는다.
+- 맞추기·연결 (사용자 결정 2026-10-30): 물체끼리 맞추기는 늘 켜짐(Alt 로 끔), **연결은 Ctrl(⌘)을 누를 때만**(또는 🔗 단추). 연결은 선 종류(`line`·`ground`·`spring`·`polyline`·`wire`)의 끝점 `links.a`/`links.b` 에 `{id, u, v}`(붙은 물체 기준틀 좌표) 또는 `{id, seg, t}`(선 위 구간·비율)로 저장하고 `resolveLinks` 가 맞춘다. 한쪽만 붙으면 통째로 따라가고, 두 쪽이면 늘어나며, 도선은 가로·세로를 지킨다. 연결된 물체만 따로 옮기면 연결이 끊긴다. 묶음은 `group` 문자열.
 
 ## 역할 분담 (사용자 지정)
 
@@ -56,3 +57,4 @@
 
 - 2026-10-28: 문항 출제용 그림·그래프 도구 (실험실 저장소 PR #47·#48: 그래프·도형·회로 13종·렌즈·거울·파동, PNG·SVG·작업 파일, AI 그리기 Claude·LM Studio) — Claude Code
 - 2026-10-30: `arduino_experiments` 에서 이 저장소로 독립, GitHub Pages 배포 — Claude Code
+- 2026-10-30: 개선 1단계 (사용자 요청: 구속 조건·밀착) — 물체끼리 맞추기(가장자리·가운데·끝점·테두리, 분홍 안내선, Alt 로 자유롭게), Ctrl+끌기 연결(상자를 옮기면 화살표가, 소자를 옮기면 도선이 따라옴), 묶기·풀기(Ctrl+G), 복제 때 묶음·연결 유지, 🔗 단추(스마트폰). 2단계(그림 위에서 바로 고치는 쉬운 화면)는 다음 PR — Claude Code

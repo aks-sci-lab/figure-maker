@@ -14,8 +14,12 @@
         drag: null,           // 끌기 중인 정보
         draft: null,          // 그리는 중인 물체 (아직 그림에 넣지 않음)
         poly: null,           // 꺾은선·도선 점 찍는 중 { type, points, hover }
-        snapHint: null,       // 도선이 붙을 소자 끝
+        snapHint: null,       // 붙은 점 표시 {x, y}
+        guides: [],           // 맞춤 안내선
+        linkHint: null,       // 연결될 물체 id (Ctrl 누른 채 끌 때)
+        connectMode: false,   // 🔗 단추: Ctrl 없이도 연결 (스마트폰용)
         lastDown: { t: 0, x: 0, y: 0 },
+        lastTap: null,        // 두 번 누르기 확인용
         undo: [], redo: [], saved: ''
     };
 
@@ -71,20 +75,52 @@
     }
     const snapOn = () => $('chk-snap').checked;
     const snapV = v => snapOn() ? Math.round(v / GRID) * GRID : Math.round(v * 10) / 10;
-    const snapP = p => ({ x: snapV(p.x), y: snapV(p.y) });
 
-    // 도선이 붙을 곳: 회로 소자 끝·다른 도선 끝·점 (12px 안)
-    function terminalSnap(p, skipId) {
-        let best = null, bd = 12;
-        for (const o of state.scene.objects) {
-            if (o.id === skipId) continue;
-            for (const t of M.terminals(o)) {
-                const d = Math.hypot(t[0] - p.x, t[1] - p.y);
-                if (d < bd) { bd = d; best = { x: Math.round(t[0] * 100) / 100, y: Math.round(t[1] * 100) / 100 }; }
-            }
-        }
-        return best;
+    // 맞추기: 다른 물체의 끝점·테두리·가장자리 선에 먼저, 없으면 격자에. Alt 를 누르면 맞추지 않음
+    const snapThr = () => { const w = svg.getBoundingClientRect().width; return 8 * state.scene.width / (w || state.scene.width); };
+    const connectOn = e => !!(e && (e.ctrlKey || e.metaKey)) || state.connectMode;
+    const freeMove = e => !!(e && e.altKey);
+    const round1 = v => Math.round(v * 10) / 10;
+    const round2 = v => Math.round(v * 100) / 100;
+    // ids 와 거기 연결되어 같이 움직이는 물체는 맞출 대상에서 뺀다
+    function targetsExcept(ids) {
+        const ex = new Set(ids);
+        for (const d of M.dependents(state.scene, ids)) ex.add(d);
+        return M.snapTargets(state.scene, ex);
     }
+    function snapPt(p, e, exclude) {
+        if (freeMove(e)) return { x: round1(p.x), y: round1(p.y), target: null, guides: [] };
+        const r = M.snapPointTo(p.x, p.y, targetsExcept(exclude || []), snapThr());
+        return { x: r.sx ? round2(r.x) : snapV(r.x), y: r.sy ? round2(r.y) : snapV(r.y), target: r.target, kind: r.kind, guides: r.guides };
+    }
+    // 맞춘 결과를 화면 표시용으로 기억
+    function showSnap(q, e) {
+        state.guides = q.guides || [];
+        state.snapHint = q.target ? { x: q.x, y: q.y } : null;
+        state.linkHint = q.target && connectOn(e) ? q.target : null;
+    }
+    function clearSnap() { state.guides = []; state.snapHint = null; state.linkHint = null; }
+
+    // 손잡이 이름 → 끝점 (a = 처음, b = 마지막)
+    function endOfHandle(o, key) {
+        if (!M.LINKABLE.includes(o.type)) return null;
+        if (o.type === 'polyline' || o.type === 'wire') return key === 'p0' ? 'a' : key === 'p' + (o.points.length - 1) ? 'b' : null;
+        return key === 'p1' ? 'a' : key === 'p2' ? 'b' : null;
+    }
+    function unlinkEnd(o, end) {
+        if (!o.links || !o.links[end]) return;
+        delete o.links[end];
+        if (!o.links.a && !o.links.b) delete o.links;
+    }
+    // 같이 옮기지 않는 물체에 붙어 있던 연결은 끊는다 (따로 옮기면 붙은 자리로 끌려가지 않게)
+    function detachFrom(ids) {
+        const set = new Set(ids);
+        for (const id of ids) {
+            const o = state.scene.objects.find(x => x.id === id);
+            for (const end of ['a', 'b']) if (o && o.links && o.links[end] && !set.has(o.links[end].id)) unlinkEnd(o, end);
+        }
+    }
+    const relink = () => M.resolveLinks(state.scene);
 
     const byId = id => state.scene.objects.find(o => o.id === id);
     const selected = () => state.sel.map(byId).filter(Boolean);
@@ -127,10 +163,20 @@
                 } catch (e) { /* 그리지 못한 물체 */ }
             }
             if (state.sel.length === 1) {
-                for (const h of M.handles(o)) s += `<circle class="handle" data-handle="${h.key}" data-oid="${o.id}" cx="${h.x}" cy="${h.y}" r="5.5"/>`;
+                for (const h of M.handles(o)) {
+                    const end = endOfHandle(o, h.key);
+                    const linked = end && o.links && o.links[end];
+                    s += `<circle class="handle${linked ? ' linked' : ''}" data-handle="${h.key}" data-oid="${o.id}" cx="${h.x}" cy="${h.y}" r="5.5"><title>${linked ? '연결됨 (끌어내면 끊김)' : '끌어서 바꾸기'}</title></circle>`;
+                }
             }
         }
-        if (state.snapHint) s += `<circle class="snap-dot" cx="${state.snapHint.x}" cy="${state.snapHint.y}" r="7"/>`;
+        // 연결될 물체 테두리, 맞춤 안내선, 붙은 점
+        if (state.linkHint) {
+            const t = byId(state.linkHint), b = t && M.bbox(t);
+            if (b) s += `<rect class="link-box" x="${b.x1 - 5}" y="${b.y1 - 5}" width="${b.x2 - b.x1 + 10}" height="${b.y2 - b.y1 + 10}"/>`;
+        }
+        for (const g of state.guides) s += `<line class="guide" x1="${g.x1}" y1="${g.y1}" x2="${g.x2}" y2="${g.y2}"/>`;
+        if (state.snapHint) s += `<circle class="snap-dot${state.linkHint ? ' linking' : ''}" cx="${state.snapHint.x}" cy="${state.snapHint.y}" r="7"/>`;
         ov.innerHTML = s;
     }
 
@@ -139,7 +185,7 @@
     const CLICK_TOOLS = ['text', 'dot', 'comp', 'lens', 'mirror', 'angle'];
     const POINT_TOOLS = ['polyline', 'wire'];
     const HINTS = {
-        select: '물체를 눌러 고르고 끌어서 옮기세요. 파란 동그라미를 끌면 크기·끝점이 바뀝니다.',
+        select: '눌러 고르고 끌어서 옮기기 · 가까우면 딱 붙음 (Alt: 자유롭게) · 선 끝을 Ctrl+끌기로 물체에 연결',
         line: '그림판에서 끌어 직선을 그리세요.', arrow: '끌어서 화살표를 그리세요 (끝 쪽에 화살촉).',
         rect: '끌어서 사각형을 그리세요.', ellipse: '끌어서 원을 그리세요.',
         ground: '끌어서 바닥(빗금)을 그리세요. 빗금 방향은 속성에서 바꿉니다.', spring: '끌어서 용수철을 그리세요.',
@@ -147,7 +193,7 @@
         text: '글자를 넣을 곳을 누르세요.', dot: '점을 찍을 곳을 누르세요.', comp: '소자를 놓을 곳을 누르세요. 놓은 뒤 R 키로 90° 돌립니다.',
         lens: '렌즈를 놓을 곳을 누르세요.', mirror: '거울을 놓을 곳을 누르세요.', angle: '각의 꼭짓점을 누르세요.',
         polyline: '점을 차례로 누르세요. 마지막 점에서 두 번 누르거나 Enter 로 끝냅니다.',
-        wire: '도선이 지날 점을 차례로 누르세요 (가로·세로로 꺾임, 소자 끝에 붙음). 두 번 누르거나 Enter 로 끝.'
+        wire: '지날 점을 차례로 누르기 (가로·세로로 꺾임) · 끝 점을 Ctrl+누르기: 소자에 연결 · 두 번 누르거나 Enter 로 끝'
     };
     function setTool(t) {
         if (state.poly) finishPoly();
@@ -156,7 +202,7 @@
         svg.classList.toggle('tool-select', t === 'select');
         svg.classList.toggle('tool-draw', t !== 'select');
         $('hint').textContent = HINTS[t] || '';
-        state.snapHint = null;
+        clearSnap();
         render();
     }
 
@@ -223,28 +269,36 @@
     }
 
     // 꺾은선·도선
-    function polyPoint(p) {
+    // 점 하나 정하기: { pt: [x, y], target, q }
+    function polyPoint(p, e) {
         const pts = state.poly.points;
-        let q = snapP(p);
-        if (state.poly.type === 'wire') {
-            const t = terminalSnap(p);
-            if (t) q = t;
-            else if (pts.length) {
-                // 가로·세로로만
-                const last = pts[pts.length - 1];
-                if (Math.abs(q.x - last[0]) >= Math.abs(q.y - last[1])) q.y = last[1]; else q.x = last[0];
-            }
+        const q = snapPt(p, e);
+        if (state.poly.type === 'wire' && pts.length && q.kind !== 'point') {
+            // 가로·세로로만 (소자 끝 같은 '점'에 붙을 때만 그 자리 그대로)
+            const last = pts[pts.length - 1];
+            if (Math.abs(q.x - last[0]) >= Math.abs(q.y - last[1])) q.y = last[1]; else q.x = last[0];
+            q.guides = [];
+            q.target = null;
         }
-        return [q.x, q.y];
+        return { pt: [q.x, q.y], target: q.target && connectOn(e) ? q.target : null, q };
     }
     function finishPoly() {
         const P = state.poly;
         state.poly = null;
-        state.snapHint = null;
+        clearSnap();
         if (!P) return;
-        const pts = P.points.filter((p, i, a) => !i || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
+        // 같은 자리를 두 번 누른 점은 하나로 (끝점 연결 정보도 같이)
+        const pts = [], tg = [];
+        P.points.forEach((p, i) => {
+            if (i && p[0] === pts[pts.length - 1][0] && p[1] === pts[pts.length - 1][1]) { tg[tg.length - 1] = tg[tg.length - 1] || P.targets[i]; return; }
+            pts.push(p); tg.push(P.targets[i]);
+        });
         if (pts.length >= 2) {
             const o = M.makeObject(P.type, { points: pts, ...(P.type === 'polyline' ? { arrow: P.arrow } : {}) });
+            const links = {};
+            if (tg[0]) links.a = M.linkFor(byId(tg[0]), ...pts[0]);
+            if (tg[tg.length - 1]) links.b = M.linkFor(byId(tg[tg.length - 1]), ...pts[pts.length - 1]);
+            if (links.a || links.b) o.links = links;
             state.scene.objects.push(o);
             state.sel = [o.id];
             commit();
@@ -263,24 +317,32 @@
         try { svg.setPointerCapture(e.pointerId); } catch (err) { /* 터치 */ }
 
         if (POINT_TOOLS.includes(state.tool)) {
-            if (!state.poly) state.poly = { type: state.tool, points: [], hover: null, arrow: 'none' };
-            if (dbl && state.poly.points.length >= 2) { finishPoly(); return; }
-            state.poly.points.push(polyPoint(p));
+            if (!state.poly) state.poly = { type: state.tool, points: [], targets: [], hover: null, arrow: 'none' };
+            const pp = polyPoint(p, e);
+            if (dbl && state.poly.points.length >= 2) {
+                // 두 번 누른 곳이 마지막 점: Ctrl 을 누르고 있었으면 연결
+                if (pp.target && !state.poly.targets[state.poly.targets.length - 1]) state.poly.targets[state.poly.targets.length - 1] = pp.target;
+                finishPoly(); return;
+            }
+            state.poly.points.push(pp.pt);
+            state.poly.targets.push(pp.target);
             render();
             return;
         }
         const handle = e.target.closest && e.target.closest('[data-handle]');
         if (handle) {
-            state.drag = { kind: 'handle', id: handle.dataset.oid, key: handle.dataset.handle };
+            const o = byId(handle.dataset.oid);
+            state.drag = { kind: 'handle', id: handle.dataset.oid, key: handle.dataset.handle, end: o ? endOfHandle(o, handle.dataset.handle) : null };
             return;
         }
         if (DRAG_TOOLS.includes(state.tool)) {
-            const a = snapP(p);
-            state.drag = { kind: 'create', a, b: a };
+            const q = snapPt(p, e);
+            const a = { x: q.x, y: q.y };
+            state.drag = { kind: 'create', a, b: a, aTarget: q.target && connectOn(e) ? q.target : null };
             return;
         }
         if (CLICK_TOOLS.includes(state.tool)) {
-            const o = createAt(state.tool, snapP(p));
+            const o = createAt(state.tool, snapPt(p, e));
             addObject(o, e.shiftKey);
             if (o.type === 'text') setTimeout(focusFirstText, 0);   // 그림판을 누른 뒤에 글자 칸으로
             return;
@@ -289,10 +351,19 @@
         const g = e.target.closest && e.target.closest('[data-id]');
         const id = g && g.dataset.id;
         if (id && byId(id)) {
-            if (e.shiftKey) state.sel = state.sel.includes(id) ? state.sel.filter(s => s !== id) : state.sel.concat(id);
-            else if (!state.sel.includes(id)) state.sel = [id];
-            state.drag = { kind: 'move', start: p, applied: { x: 0, y: 0 } };
-            if (dbl && byId(id).type === 'text') { buildProps(); setTimeout(focusFirstText, 0); state.drag = null; return; }
+            // 묶음은 함께 고름 (두 번 누르면 묶음 안의 하나만: 아래 dblclick)
+            const grp = byId(id).group;
+            const ids = grp ? state.scene.objects.filter(o => o.group === grp).map(o => o.id) : [id];
+            if (e.shiftKey) state.sel = state.sel.includes(id) ? state.sel.filter(s => !ids.includes(s)) : state.sel.concat(ids.filter(x => !state.sel.includes(x)));
+            else if (!state.sel.includes(id)) state.sel = ids;
+            const moving = state.sel.slice();
+            const boxes = moving.map(x => M.bbox(byId(x))).filter(Boolean);
+            state.drag = {
+                kind: 'move', start: p, applied: { x: 0, y: 0 }, ids: moving, hitId: id,
+                T: targetsExcept(moving),
+                box: { x1: Math.min(...boxes.map(b => b.x1)), y1: Math.min(...boxes.map(b => b.y1)), x2: Math.max(...boxes.map(b => b.x2)), y2: Math.max(...boxes.map(b => b.y2)) },
+                pts: moving.length <= 20 ? [].concat(...moving.map(x => M.snapPoints(byId(x)))) : []
+            };
         } else {
             state.sel = [];
         }
@@ -302,76 +373,142 @@
     svg.addEventListener('pointermove', e => {
         const p = toSvg(e);
         if (state.poly) {
-            state.poly.hover = polyPoint(p);
-            state.snapHint = state.poly.type === 'wire' ? terminalSnap(p) : null;
+            const pp = polyPoint(p, e);
+            state.poly.hover = pp.pt;
+            showSnap(pp.q, e);
             render();
             return;
         }
-        if (state.tool === 'wire') { state.snapHint = terminalSnap(p); drawOverlay(); }
         const d = state.drag;
-        if (!d) return;
+        if (!d) {
+            // 그리기 도구로 물체 위를 지날 때 붙을 점을 미리 보여 줌
+            if (state.tool !== 'select' && e.pointerType !== 'touch') { showSnap(snapPt(p, e), e); drawOverlay(); }
+            return;
+        }
         if (d.kind === 'create') {
-            d.b = snapP(p);
+            const q = snapPt(p, e);
+            d.b = { x: q.x, y: q.y };
+            d.bTarget = q.target && connectOn(e) ? q.target : null;
+            showSnap(q, e);
             const sh = dragShape(state.tool, d.a, d.b);
             state.draft = M.makeObject(sh.type, sh);
             state.draft.id = '__draft';
             render();
         } else if (d.kind === 'move') {
-            let dx = p.x - d.start.x, dy = p.y - d.start.y;
-            if (snapOn()) { dx = Math.round(dx / GRID) * GRID; dy = Math.round(dy / GRID) * GRID; }
+            const rx = p.x - d.start.x, ry = p.y - d.start.y;
+            let dx = round1(rx), dy = round1(ry);
+            state.guides = [];
+            if (!freeMove(e)) {
+                const r = M.snapDelta(rx, ry, d, d.T, snapThr());
+                dx = r.sx ? round2(r.dx) : snapOn() ? Math.round(rx / GRID) * GRID : dx;
+                dy = r.sy ? round2(r.dy) : snapOn() ? Math.round(ry / GRID) * GRID : dy;
+                state.guides = r.guides;
+                state.snapHint = r.point ? { x: r.point[0], y: r.point[1] } : null;
+            }
             const mx = dx - d.applied.x, my = dy - d.applied.y;
-            if (!mx && !my) return;
+            if (!mx && !my) { drawOverlay(); return; }
+            if (!d.moved) detachFrom(d.ids);
             for (const o of selected()) M.translate(o, mx, my);
+            relink();
             d.applied = { x: dx, y: dy };
             d.moved = true;
             render();
         } else if (d.kind === 'handle') {
             const o = byId(d.id);
             if (!o) return;
-            let q = snapP(p);
-            if (o.type === 'wire' || o.type === 'line') { const t = terminalSnap(p, o.id); if (t) q = t; state.snapHint = t; }
+            const q = snapPt(p, e, [o.id]);
+            if (d.end) unlinkEnd(o, d.end);     // 끌어내면 연결이 끊김 (놓을 때 Ctrl 이면 다시 연결)
+            showSnap(q, e);
+            if (!d.end) state.linkHint = null;
             M.moveHandle(o, d.key, q.x, q.y);
+            relink();
             d.moved = true;
             render();
         }
     });
 
-    function endDrag() {
+    function endDrag(e) {
         const d = state.drag;
         state.drag = null;
-        state.snapHint = null;
-        if (!d) return;
+        const linkTo = state.linkHint;
+        clearSnap();
+        if (!d) { drawOverlay(); return; }
         if (d.kind === 'create') {
             const tool = state.tool;
             const far = Math.hypot(d.b.x - d.a.x, d.b.y - d.a.y) >= 6;
             state.draft = null;
-            addObject(finalize(far ? dragShape(tool, d.a, d.b) : clickShape(tool, d.a)));
+            const o = finalize(far ? dragShape(tool, d.a, d.b) : clickShape(tool, d.a));
+            if (far && M.LINKABLE.includes(o.type)) {
+                const links = {};
+                if (d.aTarget && byId(d.aTarget)) links.a = M.linkFor(byId(d.aTarget), d.a.x, d.a.y);
+                const bt = connectOn(e) ? d.bTarget : null;
+                if (bt && byId(bt)) links.b = M.linkFor(byId(bt), d.b.x, d.b.y);
+                if (links.a || links.b) o.links = links;
+            }
+            addObject(o);
             return;
+        }
+        if (d.kind === 'handle' && d.end && linkTo && connectOn(e)) {
+            const o = byId(d.id), t = byId(linkTo);
+            if (o && t) {
+                o.links = o.links || {};
+                o.links[d.end] = M.linkFor(t, ...M.endPoint(o, d.end));
+                relink();
+                d.moved = true;
+            }
         }
         if (d.moved) { commit(); buildProps(); }
         render();
+        if (d.kind === 'move' && !d.moved && e && d.ids.length) onTap(e, d.hitId);
+    }
+    // 두 번 누르기 (끌지 않고 0.4초 안에 같은 곳): 묶음 안의 하나만 고르고, 글자면 글자 칸으로.
+    // 그림판을 누를 때마다 다시 그려서 브라우저의 dblclick 이 오지 않으므로 직접 센다
+    function onTap(e, id) {
+        const now = Date.now(), last = state.lastTap;
+        state.lastTap = { t: now, x: e.clientX, y: e.clientY, id };
+        if (!last || last.id !== id || now - last.t > 400 || Math.hypot(e.clientX - last.x, e.clientY - last.y) > 8) return;
+        state.lastTap = null;
+        const o = byId(id);
+        if (!o) return;
+        state.sel = [o.id];
+        render(); buildProps();
+        if (o.type === 'text') setTimeout(focusFirstText, 0);
     }
     svg.addEventListener('pointerup', endDrag);
     svg.addEventListener('pointercancel', endDrag);
-    svg.addEventListener('pointerleave', () => { if (state.poly) { state.poly.hover = null; render(); } });
+    svg.addEventListener('pointerleave', () => {
+        if (state.poly) { state.poly.hover = null; clearSnap(); render(); }
+        else if (!state.drag && (state.snapHint || state.guides.length)) { clearSnap(); drawOverlay(); }
+    });
 
     // ───────────────────────── 편집 명령 ─────────────────────────
     function removeSel() {
         if (!state.sel.length) return;
         state.scene.objects = state.scene.objects.filter(o => !state.sel.includes(o.id));
         state.sel = [];
+        relink();   // 지운 물체에 붙어 있던 연결은 끊김 (위치는 그대로)
         commit(); render(); buildProps();
     }
     function duplicateSel() {
-        const copies = selected().map(o => { const c = JSON.parse(JSON.stringify(o)); c.id = M.newId(); M.translate(c, 20, 20); return c; });
+        const idMap = new Map();
+        const copies = selected().map(o => {
+            const c = JSON.parse(JSON.stringify(o));
+            c.id = M.newId(); idMap.set(o.id, c.id);
+            M.translate(c, 20, 20);
+            return c;
+        });
         if (!copies.length) return;
+        M.remapCopies(copies, idMap);
         state.scene.objects.push(...copies);
         state.sel = copies.map(c => c.id);
+        relink();
         commit(); render(); buildProps();
     }
     function nudge(dx, dy) {
         if (!state.sel.length) return;
+        detachFrom(state.sel);
         for (const o of selected()) M.translate(o, dx, dy);
+        relink();
         commit(); render(); buildProps();
     }
     function rotateSel() {
@@ -379,7 +516,29 @@
         for (const o of selected()) {
             if ('rot' in o) { o.rot = ((o.rot + 90) % 360 + 360) % 360; changed = true; }
         }
-        if (changed) { commit(); render(); buildProps(); }
+        if (changed) { relink(); commit(); render(); buildProps(); }
+    }
+    // 묶기·풀기·연결 끊기
+    function groupSel() {
+        if (state.sel.length < 2) return;
+        const g = M.newId();
+        for (const o of selected()) o.group = g;
+        commit(); render(); buildProps();
+    }
+    function ungroupSel() {
+        let n = 0;
+        for (const o of selected()) if (o.group) { delete o.group; n++; }
+        if (n) { commit(); render(); buildProps(); }
+    }
+    function unlinkSel() {
+        let n = 0;
+        for (const o of selected()) if (o.links) { delete o.links; n++; }
+        if (n) { commit(); render(); buildProps(); }
+    }
+    function setConnectMode(on) {
+        state.connectMode = on;
+        $('btn-connect').classList.toggle('on', on);
+        $('btn-connect').setAttribute('aria-pressed', on ? 'true' : 'false');
     }
     function reorder(front) {
         const objs = state.scene.objects;
@@ -402,6 +561,7 @@
         if (e.key === 'Enter' && state.poly) { finishPoly(); return; }
         if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeSel(); return; }
         if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSel(); return; }
+        if (ctrl && e.key.toLowerCase() === 'g') { e.preventDefault(); if (e.shiftKey) ungroupSel(); else groupSel(); return; }
         if (!ctrl && e.key.toLowerCase() === 'r') { rotateSel(); return; }
         if (!ctrl && e.key.toLowerCase() === 'v') { setTool('select'); return; }
         const step = e.shiftKey ? GRID : 1;
@@ -506,6 +666,7 @@
     let lastTextInput = null;   // 기호 단추가 넣을 곳
     let propTimer = null;
     function changed(rebuild) {
+        relink();
         render();
         clearTimeout(propTimer);
         propTimer = setTimeout(commit, 400);
@@ -647,14 +808,20 @@
             el('button', { onclick: () => reorder(true) }, '맨 앞으로'),
             el('button', { onclick: () => reorder(false) }, '맨 뒤로'),
             sel.some(o => o.type === 'comp' || o.type === 'mirror' || o.type === 'rect') ? el('button', { onclick: rotateSel, title: 'R' }, '⟳ 90°') : null,
+            sel.length > 1 && !(sel[0].group && sel.every(o => o.group === sel[0].group)) ? el('button', { onclick: groupSel, title: 'Ctrl+G' }, '▣ 묶기') : null,
+            sel.some(o => o.group) ? el('button', { onclick: ungroupSel, title: 'Ctrl+Shift+G' }, '▢ 묶음 풀기') : null,
+            sel.some(o => o.links) ? el('button', { onclick: unlinkSel }, '✂ 연결 끊기') : null,
             el('button', { class: 'danger', onclick: removeSel, title: 'Delete' }, '🗑 지우기'));
+        const linkNote = sel.some(o => o.links) ? el('p', { class: 'note link-note' }, '🔗 끝점이 다른 물체에 연결되어 있어, 그 물체를 옮기면 따라갑니다.') : null;
         if (sel.length > 1) {
-            box.append(el('div', { class: 'type-title' }, `${sel.length}개 선택`), acts,
-                el('p', { class: 'note' }, '끌면 함께 움직입니다. 하나만 고르면 자세한 속성이 나옵니다.'));
+            const grouped = sel[0].group && sel.every(o => o.group === sel[0].group);
+            box.append(el('div', { class: 'type-title' }, grouped ? `묶음 (${sel.length}개)` : `${sel.length}개 선택`), acts,
+                el('p', { class: 'note' }, grouped ? '하나처럼 움직입니다. 안의 하나만 고치려면 그 물체를 두 번 누르세요.' : '끌면 함께 움직입니다. ‘묶기’를 하면 다음부터 한 번에 골라집니다.'), linkNote);
             return;
         }
         const o = sel[0];
         box.append(el('div', { class: 'type-title' }, TYPE_NAMES[o.type] || o.type), acts);
+        if (linkNote) box.append(linkNote);
         buildFields(box, o, FIELDS[o.type] || [], rebuild => changed(rebuild));
     }
 
@@ -922,6 +1089,7 @@
 
     // ───────────────────────── 시작 ─────────────────────────
     document.querySelectorAll('#tools [data-tool]').forEach(b => b.addEventListener('click', () => setTool(b.dataset.tool)));
+    $('btn-connect').addEventListener('click', () => setConnectMode(!state.connectMode));
     $('sel-comp').addEventListener('change', () => setTool('comp'));
     document.querySelectorAll('.tabs [data-tab]').forEach(b => b.addEventListener('click', () => {
         document.querySelectorAll('.tabs [data-tab]').forEach(x => x.classList.toggle('on', x === b));

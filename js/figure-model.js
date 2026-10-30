@@ -336,6 +336,22 @@
         if (type === 'spring') o.coils = Math.round(Math.min(40, Math.max(2, o.coils)));
         if (type === 'comp') { o.cells = Math.round(Math.min(6, Math.max(1, o.cells))); o.len = Math.max(30, o.len); }
         if (type === 'wave') o.lambda = Math.max(4, o.lambda);
+        if (typeof raw.group === 'string' && raw.group) o.group = raw.group.slice(0, 40);
+        if (['line', 'ground', 'spring', 'polyline', 'wire'].includes(type) && raw.links && typeof raw.links === 'object') {
+            const links = {};
+            for (const e of ['a', 'b']) {
+                const L = raw.links[e];
+                if (!L || typeof L.id !== 'string' || !L.id) continue;
+                if ('seg' in L) {
+                    const seg = Math.round(Number(L.seg)), t = Number(L.t);
+                    if (seg >= 0 && finite(t)) links[e] = { id: L.id.slice(0, 40), seg, t: Math.max(0, Math.min(1, t)) };
+                } else {
+                    const u = Number(L.u), v = Number(L.v);
+                    if (finite(u) && finite(v)) links[e] = { id: L.id.slice(0, 40), u, v };
+                }
+            }
+            if (links.a || links.b) o.links = links;
+        }
         return o;
     }
 
@@ -424,6 +440,315 @@
             }
             case 'lens': case 'mirror': o.h = Math.max(10, r2(2 * Math.hypot(x - o.x, y - o.y))); break;
             case 'comp': o.len = Math.max(30, r2(2 * Math.hypot(x - o.x, y - o.y))); break;
+        }
+    }
+
+    // ───────────────────────── 맞추기·연결 ─────────────────────────
+    // 물체 기준틀: 점 (u, v) → 화면 = (x, y) + 회전(rot)·(u·sx, v·sy). 선 종류는 기준틀 없이 구간(seg)·비율(t)로 붙인다
+    function frame(o) {
+        switch (o.type) {
+            case 'rect': return { x: o.x + o.w / 2, y: o.y + o.h / 2, rot: o.rot, sx: o.w || 1, sy: o.h || 1 };
+            case 'ellipse': return { x: o.cx, y: o.cy, rot: 0, sx: 2 * o.rx || 1, sy: 2 * o.ry || 1 };
+            case 'comp': return { x: o.x, y: o.y, rot: o.rot, sx: o.len, sy: o.len };
+            case 'lens': return { x: o.x, y: o.y, rot: 0, sx: o.h, sy: o.h };
+            case 'mirror': return { x: o.x, y: o.y, rot: o.rot, sx: o.h, sy: o.h };
+            case 'graph': return { x: o.x, y: o.y, rot: 0, sx: o.w, sy: o.h };
+            case 'wave': return { x: o.x, y: o.y, rot: 0, sx: o.length || 1, sy: 1 };
+            case 'dot': case 'text': case 'angle': return { x: o.x, y: o.y, rot: 0, sx: 1, sy: 1 };
+            default: return null;
+        }
+    }
+    const toWorld = (F, u, v) => rotPt(F.x + u * F.sx, F.y + v * F.sy, F.x, F.y, F.rot);
+    function toLocal(F, px, py) {
+        const [lx, ly] = rotPt(px, py, F.x, F.y, -F.rot);
+        return [(lx - F.x) / F.sx, (ly - F.y) / F.sy];
+    }
+    // 선 종류의 점 목록
+    function linePoints(o) {
+        if (o.type === 'line' || o.type === 'ground' || o.type === 'spring') return [[o.x1, o.y1], [o.x2, o.y2]];
+        if (o.type === 'polyline' || o.type === 'wire') return o.closed ? o.points.concat([o.points[0]]) : o.points;
+        return null;
+    }
+    function projectSeg(pts, px, py) {
+        let best = null;
+        for (let i = 0; i + 1 < pts.length; i++) {
+            const [ax, ay] = pts[i], [bx, by] = pts[i + 1];
+            const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+            const t = L2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / L2)) : 0;
+            const x = ax + dx * t, y = ay + dy * t, d = Math.hypot(px - x, py - y);
+            if (!best || d < best.d) best = { x, y, d, seg: i, t };
+        }
+        return best;
+    }
+
+    // 화면에 보이는 대략의 테두리 상자 {x1, y1, x2, y2}
+    function bbox(o) {
+        const box = pts => {
+            const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+            return { x1: Math.min(...xs), y1: Math.min(...ys), x2: Math.max(...xs), y2: Math.max(...ys) };
+        };
+        const rotBox = (F, hw, hh) => box([[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([a, b]) => rotPt(F.x + a, F.y + b, F.x, F.y, F.rot)));
+        switch (o.type) {
+            case 'line': case 'ground': case 'spring': case 'polyline': case 'wire': return box(linePoints(o));
+            case 'rect': return rotBox(frame(o), o.w / 2, o.h / 2);
+            case 'ellipse': return { x1: o.cx - o.rx, y1: o.cy - o.ry, x2: o.cx + o.rx, y2: o.cy + o.ry };
+            case 'comp': return rotBox(frame(o), o.len / 2, 12);
+            case 'lens': { const t = Math.max(8, o.h * 0.09); return { x1: o.x - t, y1: o.y - o.h / 2, x2: o.x + t, y2: o.y + o.h / 2 }; }
+            case 'mirror': return rotBox(frame(o), 4, o.h / 2);
+            case 'dot': return { x1: o.x - o.r, y1: o.y - o.r, x2: o.x + o.r, y2: o.y + o.r };
+            case 'wave': { const a = Math.abs(o.amp); return { x1: o.x, y1: o.y - a, x2: o.x + o.length, y2: o.y + a }; }
+            case 'angle': return { x1: o.x - o.r, y1: o.y - o.r, x2: o.x + o.r, y2: o.y + o.r };
+            case 'graph': return { x1: o.x, y1: o.y, x2: o.x + o.w, y2: o.y + o.h };
+            case 'text': {
+                const lines = String(o.text).split('\n');
+                const w = Math.max(...lines.map(l => textWidth(l, o.size)));
+                const x1 = o.anchor === 'start' ? o.x : o.anchor === 'end' ? o.x - w : o.x - w / 2;
+                return { x1, y1: o.y - o.size * 0.75, x2: x1 + w, y2: o.y + o.size * 0.25 + (lines.length - 1) * o.size * 1.25 };
+            }
+        }
+        return null;
+    }
+
+    // 붙기 좋은 점 (끝점·소자 끝·중심·모서리 가운데 등)
+    function snapPoints(o) {
+        const L = linePoints(o);
+        if (L) return o.type === 'polyline' || o.type === 'wire' ? o.points.map(p => p.slice()) : L;
+        const F = frame(o);
+        switch (o.type) {
+            case 'rect': return [[0, 0], [-.5, 0], [.5, 0], [0, -.5], [0, .5], [-.5, -.5], [.5, -.5], [.5, .5], [-.5, .5]].map(([u, v]) => toWorld(F, u, v));
+            case 'ellipse': return [[0, 0], [-.5, 0], [.5, 0], [0, -.5], [0, .5]].map(([u, v]) => toWorld(F, u, v));
+            case 'comp': return terminals(o).concat([[o.x, o.y]]);
+            case 'lens': case 'mirror': return [[0, 0], [0, -.5], [0, .5]].map(([u, v]) => toWorld(F, u, v));
+            case 'dot': case 'angle': return [[o.x, o.y]];
+            case 'wave': return [[o.x, o.y], [o.x + o.length, o.y]];
+            case 'graph': return [[o.x, o.y + o.h], [o.x, o.y], [o.x + o.w, o.y + o.h]];
+        }
+        return [];
+    }
+
+    // 물체 테두리(선) 위에서 p 와 가장 가까운 점과, 그 점에 붙일 때의 연결 정보
+    function nearestOn(o, px, py) {
+        const L = linePoints(o);
+        if (L) { const q = projectSeg(L, px, py); return q && { x: q.x, y: q.y, d: q.d, link: { id: o.id, seg: q.seg, t: q.t } }; }
+        const F = frame(o);
+        if (!F) return null;
+        let u, v;
+        const [lu, lv] = toLocal(F, px, py);
+        switch (o.type) {
+            case 'rect': case 'graph': case 'text': {
+                // 상자 테두리: 안쪽이면 가장 가까운 변으로, 바깥이면 상자 안으로 당김
+                let hw = 0.5, hh = 0.5, cu = 0, cv = 0;
+                if (o.type === 'graph') { cu = 0.5; cv = 0.5; }
+                if (o.type === 'text') {
+                    const b = bbox(o);
+                    hw = (b.x2 - b.x1) / 2; hh = (b.y2 - b.y1) / 2; cu = (b.x1 + b.x2) / 2 - o.x; cv = (b.y1 + b.y2) / 2 - o.y;
+                }
+                let a = lu - cu, b = lv - cv;
+                if (Math.abs(a) < hw && Math.abs(b) < hh) {
+                    // 안쪽: 가장 가까운 변 (실제 거리로 비교)
+                    const dx = (hw - Math.abs(a)) * F.sx, dy = (hh - Math.abs(b)) * F.sy;
+                    if (dx < dy) a = Math.sign(a || 1) * hw; else b = Math.sign(b || 1) * hh;
+                } else { a = Math.max(-hw, Math.min(hw, a)); b = Math.max(-hh, Math.min(hh, b)); }
+                u = a + cu; v = b + cv;
+                break;
+            }
+            case 'ellipse': { const th = Math.atan2(lv, lu); u = Math.cos(th) / 2; v = Math.sin(th) / 2; break; }
+            case 'comp': u = Math.max(-0.5, Math.min(0.5, lu)); v = 0; break;
+            case 'lens': case 'mirror': u = 0; v = Math.max(-0.5, Math.min(0.5, lv)); break;
+            case 'dot': case 'angle': u = 0; v = 0; break;
+            case 'wave': u = Math.max(0, Math.min(1, lu)); v = 0; break;
+            default: return null;
+        }
+        const [x, y] = toWorld(F, u, v);
+        return { x, y, d: Math.hypot(px - x, py - y), link: { id: o.id, u, v } };
+    }
+
+    // 점 (x, y) 를 물체 o 에 붙일 때의 연결 정보
+    function linkFor(o, x, y) {
+        const L = linePoints(o);
+        if (L) { const q = projectSeg(L, x, y); return { id: o.id, seg: q.seg, t: r2(q.t * 1e4) / 1e4 }; }
+        const F = frame(o);
+        if (!F) return null;
+        const [u, v] = toLocal(F, x, y);
+        return { id: o.id, u: Math.round(u * 1e5) / 1e5, v: Math.round(v * 1e5) / 1e5 };
+    }
+    function linkPoint(t, L) {
+        if ('seg' in L) {
+            const P = linePoints(t);
+            if (!P || P.length < 2) return null;
+            const i = Math.max(0, Math.min(P.length - 2, L.seg | 0));
+            return [P[i][0] + (P[i + 1][0] - P[i][0]) * L.t, P[i][1] + (P[i + 1][1] - P[i][1]) * L.t];
+        }
+        const F = frame(t);
+        return F ? toWorld(F, L.u, L.v) : null;
+    }
+
+    // 끝점 (a = 처음, b = 마지막)
+    const LINKABLE = ['line', 'ground', 'spring', 'polyline', 'wire'];
+    function endPoint(o, end) {
+        if (o.type === 'polyline' || o.type === 'wire') return o.points[end === 'a' ? 0 : o.points.length - 1];
+        return end === 'a' ? [o.x1, o.y1] : [o.x2, o.y2];
+    }
+    // 끝점 옮기기. 도선은 가로·세로로 꺾인 모양을 지킨다
+    function setEnd(o, end, x, y) {
+        x = r2(x); y = r2(y);
+        if (o.type === 'polyline' || o.type === 'wire') {
+            const P = o.points, n = P.length, i = end === 'a' ? 0 : n - 1, j = end === 'a' ? 1 : n - 2;
+            const old = P[i], nb = P[j];
+            if (o.type === 'wire') {
+                const horiz = Math.abs(old[1] - nb[1]) < 0.01, vert = Math.abs(old[0] - nb[0]) < 0.01;
+                if (n >= 3) {
+                    // 옆 점을 같이 옮기되, 그 너머 구간과 한 줄(일직선)이었으면 옆 점은 두고 꺾는 점을 새로 넣는다
+                    const nb2 = P[end === 'a' ? 2 : n - 3];
+                    if (horiz && !vert && Math.abs(nb[1] - y) > 0.01) {
+                        if (Math.abs(nb2[1] - nb[1]) < 0.01) P.splice(end === 'a' ? 1 : n - 1, 0, [nb[0], y]); else nb[1] = y;
+                    } else if (vert && !horiz && Math.abs(nb[0] - x) > 0.01) {
+                        if (Math.abs(nb2[0] - nb[0]) < 0.01) P.splice(end === 'a' ? 1 : n - 1, 0, [x, nb[1]]); else nb[0] = x;
+                    }
+                    P[end === 'a' ? 0 : P.length - 1] = [x, y];
+                    return;
+                } else if (Math.abs(nb[0] - x) > 0.01 && Math.abs(nb[1] - y) > 0.01) {
+                    // 두 점뿐인 도선이 비스듬해지면 꺾는 점을 하나 넣는다
+                    const elbow = horiz ? [nb[0], y] : [x, nb[1]];
+                    P.splice(1, 0, elbow);
+                    P[end === 'a' ? 0 : P.length - 1] = [x, y];
+                    return;
+                }
+            }
+            P[i] = [x, y];
+            return;
+        }
+        if (end === 'a') { o.x1 = x; o.y1 = y; } else { o.x2 = x; o.y2 = y; }
+    }
+
+    // 연결된 끝점을 붙은 물체 위치에 맞춘다. 한쪽만 붙었으면 통째로 따라가고, 두 쪽 다 붙었으면 늘어난다.
+    // 바뀐 물체 id 목록을 돌려준다
+    function resolveLinks(scene) {
+        const byId = new Map(scene.objects.map(o => [o.id, o]));
+        const touched = new Set();
+        for (let pass = 0; pass < 8; pass++) {
+            let changed = false;
+            for (const o of scene.objects) {
+                if (!o.links) continue;
+                const want = {};
+                for (const end of ['a', 'b']) {
+                    const L = o.links[end];
+                    if (!L) continue;
+                    const t = byId.get(L.id);
+                    const p = t && t !== o ? linkPoint(t, L) : null;
+                    if (!p || !p.every(finite)) { delete o.links[end]; continue; }
+                    want[end] = p;
+                }
+                if (!o.links.a && !o.links.b) { delete o.links; continue; }
+                const ends = Object.keys(want);
+                if (ends.length === 1) {
+                    const e = ends[0], cur = endPoint(o, e);
+                    const dx = want[e][0] - cur[0], dy = want[e][1] - cur[1];
+                    if (Math.abs(dx) > 0.005 || Math.abs(dy) > 0.005) { translate(o, dx, dy); changed = true; touched.add(o.id); }
+                } else {
+                    for (const e of ends) {
+                        const cur = endPoint(o, e);
+                        if (Math.abs(want[e][0] - cur[0]) > 0.005 || Math.abs(want[e][1] - cur[1]) > 0.005) {
+                            setEnd(o, e, want[e][0], want[e][1]); changed = true; touched.add(o.id);
+                        }
+                    }
+                }
+            }
+            if (!changed) break;
+        }
+        return [...touched];
+    }
+
+    // ids 에 (직접·간접으로) 연결된 물체들
+    function dependents(scene, ids) {
+        const set = new Set(ids), out = new Set();
+        let grew = true;
+        while (grew) {
+            grew = false;
+            for (const o of scene.objects) {
+                if (set.has(o.id) || !o.links) continue;
+                if (['a', 'b'].some(e => o.links[e] && set.has(o.links[e].id))) { set.add(o.id); out.add(o.id); grew = true; }
+            }
+        }
+        return out;
+    }
+
+    // 맞출 대상: 다른 물체들의 가장자리·가운데 선과 붙기 좋은 점
+    function snapTargets(scene, exclude) {
+        const xs = [], ys = [], pts = [], objs = [];
+        for (const o of scene.objects) {
+            if (exclude && exclude.has(o.id)) continue;
+            const b = bbox(o);
+            if (!b) continue;
+            objs.push(o);
+            for (const x of [b.x1, (b.x1 + b.x2) / 2, b.x2]) xs.push({ v: x, a: b.y1, b: b.y2 });
+            for (const y of [b.y1, (b.y1 + b.y2) / 2, b.y2]) ys.push({ v: y, a: b.x1, b: b.x2 });
+            for (const p of snapPoints(o)) pts.push({ x: p[0], y: p[1], id: o.id });
+        }
+        return { xs, ys, pts, objs };
+    }
+
+    // 여러 물체를 (dx, dy) 만큼 옮길 때 다른 물체에 맞춘 값. moving = { box, pts }
+    // 반환: { dx, dy, sx, sy (그 축이 맞춰졌는지), guides: [{x1,y1,x2,y2}] }
+    function snapDelta(dx, dy, moving, T, thr) {
+        const b = moving.box;
+        let best = null;
+        for (const mp of moving.pts || []) {
+            for (const tp of T.pts) {
+                const ex = tp.x - (mp[0] + dx), ey = tp.y - (mp[1] + dy), d = Math.hypot(ex, ey);
+                if (d <= thr && (!best || d < best.d)) best = { d, ex, ey, x: tp.x, y: tp.y };
+            }
+        }
+        if (best) return { dx: dx + best.ex, dy: dy + best.ey, sx: true, sy: true, guides: [], point: [best.x, best.y] };
+        const pick = (keys, lines, delta) => {
+            let m = null;
+            for (const k of keys) for (const L of lines) {
+                const e = L.v - (k + delta);
+                if (Math.abs(e) <= thr && (!m || Math.abs(e) < Math.abs(m.e))) m = { e, L };
+            }
+            return m;
+        };
+        const mx = pick([b.x1, (b.x1 + b.x2) / 2, b.x2], T.xs, dx);
+        const my = pick([b.y1, (b.y1 + b.y2) / 2, b.y2], T.ys, dy);
+        const ndx = mx ? dx + mx.e : dx, ndy = my ? dy + my.e : dy;
+        const guides = [];
+        if (mx) guides.push({ x1: mx.L.v, x2: mx.L.v, y1: Math.min(mx.L.a, b.y1 + ndy), y2: Math.max(mx.L.b, b.y2 + ndy) });
+        if (my) guides.push({ y1: my.L.v, y2: my.L.v, x1: Math.min(my.L.a, b.x1 + ndx), x2: Math.max(my.L.b, b.x2 + ndx) });
+        return { dx: ndx, dy: ndy, sx: !!mx, sy: !!my, guides };
+    }
+
+    // 점 하나(끝점·크기 손잡이)를 맞춤: 붙기 좋은 점 → 물체 테두리 → 가장자리 선 순서
+    // 반환: { x, y, sx, sy, target (물체 id 또는 null), guides }
+    function snapPointTo(px, py, T, thr) {
+        let best = null;
+        for (const tp of T.pts) {
+            const d = Math.hypot(tp.x - px, tp.y - py);
+            if (d <= thr && (!best || d < best.d)) best = { d, x: tp.x, y: tp.y, target: tp.id, kind: 'point' };
+        }
+        if (!best) {
+            for (const o of T.objs) {
+                const q = nearestOn(o, px, py);
+                if (q && q.d <= thr * 0.75 && (!best || q.d < best.d)) best = { d: q.d, x: q.x, y: q.y, target: o.id, kind: 'edge' };
+            }
+        }
+        if (best) return { x: best.x, y: best.y, sx: true, sy: true, target: best.target, kind: best.kind, guides: [] };
+        const r = snapDelta(0, 0, { box: { x1: px, y1: py, x2: px, y2: py } }, { xs: T.xs, ys: T.ys, pts: [] }, thr);
+        return { x: px + r.dx, y: py + r.dy, sx: r.sx, sy: r.sy, target: null, kind: r.sx || r.sy ? 'line' : null, guides: r.guides };
+    }
+
+    // 복제할 때 묶음·연결을 복사본끼리로 바꾼다 (복사하지 않은 물체에 붙은 연결은 끊음)
+    function remapCopies(copies, idMap) {
+        const gmap = new Map();
+        for (const c of copies) {
+            if (c.group) { if (!gmap.has(c.group)) gmap.set(c.group, newId()); c.group = gmap.get(c.group); }
+            if (c.links) {
+                for (const e of ['a', 'b']) {
+                    const L = c.links[e];
+                    if (!L) continue;
+                    if (idMap.has(L.id)) L.id = idMap.get(L.id); else delete c.links[e];
+                }
+                if (!c.links.a && !c.links.b) delete c.links;
+            }
         }
     }
 
@@ -1063,6 +1388,8 @@
         normalizeObject, normalizeScene, makeObject, newId,
         translate, terminals, handles, moveHandle, rotPt,
         graphTicks, niceStep, plotPoints, renderObject, renderInner, renderSVG,
-        encodeMoved, decodeMoved
+        encodeMoved, decodeMoved,
+        frame, toWorld, toLocal, bbox, snapPoints, nearestOn, linkFor, linkPoint, LINKABLE, endPoint, setEnd,
+        resolveLinks, dependents, snapTargets, snapDelta, snapPointTo, remapCopies
     };
 });
