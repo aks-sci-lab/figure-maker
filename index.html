@@ -27,6 +27,7 @@
     <nav class="tools" id="tools" aria-label="그리기 도구">
         <div class="grp">
             <button data-tool="select" title="선택·이동 (V)">↖ 선택</button>
+            <button id="btn-connect" aria-pressed="false" title="켜면 Ctrl 을 누르지 않아도 선·화살표·도선 끝이 물체에 연결됩니다 (스마트폰용)">🔗 연결</button>
         </div>
         <div class="grp">
             <button data-tool="line" title="직선: 끌어서 그리기">╱ 선</button>
@@ -82,7 +83,7 @@
                 <svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg>
             </div>
             <div class="stage-bar small">
-                <span>단축키: Delete 지우기 · Ctrl+D 복제 · 방향키 이동(Shift 10칸) · R 돌리기 · Esc 선택 해제 · Shift+누르기 여러 개 선택</span>
+                <span>끌 때 다른 물체에 가까우면 딱 붙음 · <b>Ctrl</b>+끝점 끌기: 물체에 연결(같이 움직임) · <b>Alt</b>+끌기: 붙지 않고 자유롭게 · Ctrl+G 묶기 · Ctrl+Shift+G 풀기 · 두 번 누르기: 묶음 안 하나만 · Delete 지우기 · Ctrl+D 복제 · 방향키 이동 · R 돌리기 · Shift+누르기 여러 개 선택</span>
             </div>
         </section>
 

@@ -11,6 +11,7 @@
 - 광학·파동: 볼록·오목 렌즈, 평면·오목·볼록 거울, 사인 파동·정상파
 - AI 그리기: 글이나 손그림·문항 사진을 주면 Claude 가 그림 자료(JSON)를 만들어 넣음 → 보통 그림처럼 고칠 수 있음. 선생님 본인의 Claude API 키가 필요하고, 브라우저에서 Anthropic 으로 바로 보냄
 - AI 그리기 (내 PC): LM Studio 의 로컬 모델(예: Gemma)로도 그림. 요금 없고 내용이 PC 밖으로 나가지 않음. LM Studio 에서 Context Length 16384 이상, 서버의 Enable CORS 켜기 (`js/figure-ai-local.js`)
+- 맞추기·연결·묶기: 끌 때 다른 물체의 가장자리·끝점에 가까우면 딱 붙음(분홍 안내선, Alt 를 누르면 자유롭게). 선·화살표·도선의 끝을 **Ctrl** 을 누른 채 물체에 가져가면 연결되어 그 물체를 옮기면 따라옴(🔗 단추를 켜면 Ctrl 없이). 여러 개를 고르고 Ctrl+G 로 묶기
 - 내보내기: PNG 복사(한글·워드에 바로 붙여 넣기)·PNG 저장(2~4배)·SVG 저장, 작업 파일(.json) 저장·열기, 브라우저에 자동 저장
 - 계산·그리기: `js/figure-model.js`, 화면: `js/figure-maker.js`, AI: `js/figure-ai.js`·`js/figure-ai-local.js` (규칙은 `js/figure-ai-prompt.js` 하나를 같이 씀)
 
