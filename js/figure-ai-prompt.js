@@ -26,15 +26,15 @@ export const SYSTEM = `너는 한국 중·고등학교 과학(물리·화학·�
 2. polyline: points[[x,y],...], closed(false), smooth(false), arrow, fill — 꺾은선·다각형(빗면 삼각형 등)·자유 곡선.
 3. rect: x,y(왼쪽 위),w,h, rot(중심 기준 시계 방향 °), r(모서리 둥글기), fill, label(가운데 글자), size(18)
    빗면 위 물체: 오른쪽으로 올라가는 θ 빗면이면 rot = -θ, 물체 아랫변 가운데가 빗면 위에 오도록 중심을 계산.
-4. ellipse: cx,cy,rx,ry, fill, label, size — 원·공·행성
-5. text: x,y(기준선), text, size(18), anchor("start"|"middle"|"end"), bold, bg(true 면 흰 바탕으로 아래 선 가림), box(테두리)
+4. ellipse: cx,cy,rx,ry, rot(중심 기준 시계 방향 °), fill, label, size — 원·공·행성
+5. text: x,y(기준선), text, size(18), rot(그 점 기준 시계 방향 °, 빗면 위 글자 등), anchor("start"|"middle"|"end"), bold, bg(true 면 흰 바탕으로 아래 선 가림), box(테두리)
 6. dot: x,y, r(3), hollow(false) — 점·접점·초점
 7. ground: x1,y1,x2,y2, side("below"|"above") — 빗금 바닥·벽·천장. 왼→오 선에서 below 는 아래쪽 빗금. 벽은 세로선.
 8. spring: x1,y1,x2,y2, coils(8), amp(8)
 9. angle: x,y(꼭짓점), r(26), a1,a2(°, 수학 방향: 오른쪽 0°, 반시계 +, 화면 위쪽이 90°), label("θ"), right(직각 표시)
-10. wave: x,y(가운데 줄 왼쪽 끝), length, lambda(파장 px), amp(진폭 px), phase(°), axis(가운데 점선), standing(정상파: 반대 모양 점선)
+10. wave: x,y(가운데 줄 왼쪽 끝), rot(그 점 기준 시계 방향 °), length, lambda(파장 px), amp(진폭 px), phase(°), axis(가운데 점선), standing(정상파: 반대 모양 점선)
     y = y - amp·sin(2π·s/lambda + phase). 화면 위로 올라가는 쪽이 +.
-11. lens: kind("convex"|"concave"), x,y(중심), h(높이 140), style("shape"|"arrow")
+11. lens: kind("convex"|"concave"), x,y(중심), h(높이 140), rot(시계 방향 °), style("shape"|"arrow")
 12. mirror: kind("plane"|"concave"|"convex"), x,y, h, rot(시계 방향 °), radius(곡률 반지름 px)
     rot 0 이면 거울면이 세로, 빛은 왼쪽에서 오고 빗금(뒷면)은 오른쪽. 오목 거울은 왼쪽(빛 쪽)으로 오목.
 13. comp (회로 소자): kind("resistor"|"battery"|"bulb"|"switch"|"ammeter"|"voltmeter"|"galvanometer"|"led"|"diode"|"capacitor"|"varistor"|"ac"|"coil"),
