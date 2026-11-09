@@ -223,17 +223,17 @@
     const DEFAULTS = {
         line: { x1: 0, y1: 0, x2: 120, y2: 0, arrow: 'none', ...STROKE },
         rect: { x: 0, y: 0, w: 100, h: 60, r: 0, rot: 0, fill: 'none', label: '', size: 18, ...STROKE },
-        ellipse: { cx: 0, cy: 0, rx: 40, ry: 40, fill: 'none', label: '', size: 18, ...STROKE },
+        ellipse: { cx: 0, cy: 0, rx: 40, ry: 40, rot: 0, fill: 'none', label: '', size: 18, ...STROKE },
         polyline: { points: [[0, 0], [100, 0]], closed: false, smooth: false, arrow: 'none', fill: 'none', ...STROKE },
         wire: { points: [[0, 0], [100, 0]], color: INK, width: 1.5 },
-        text: { x: 0, y: 0, text: '글자', size: 18, anchor: 'middle', font: '', bold: false, color: INK, bg: false, box: false },
+        text: { x: 0, y: 0, text: '글자', size: 18, rot: 0, anchor: 'middle', font: '', bold: false, color: INK, bg: false, box: false },
         dot: { x: 0, y: 0, r: 3, hollow: false, color: INK },
         ground: { x1: 0, y1: 0, x2: 160, y2: 0, side: 'below', gap: 8, color: INK, width: 1.5 },
         spring: { x1: 0, y1: 0, x2: 120, y2: 0, coils: 8, amp: 8, color: INK, width: 1.5 },
         comp: { kind: 'resistor', x: 0, y: 0, rot: 0, len: 80, label: '', labelSide: 'a', style: 'zigzag', cells: 1, on: false, size: 16, color: INK, width: 1.5 },
-        lens: { kind: 'convex', x: 0, y: 0, h: 140, style: 'shape', fill: 'none', color: INK, width: 1.5 },
+        lens: { kind: 'convex', x: 0, y: 0, h: 140, rot: 0, style: 'shape', fill: 'none', color: INK, width: 1.5 },
         mirror: { kind: 'plane', x: 0, y: 0, h: 140, rot: 0, radius: 220, color: INK, width: 1.5 },
-        wave: { x: 0, y: 0, length: 300, lambda: 100, amp: 30, phase: 0, standing: false, axis: true, ...STROKE, width: 2 },
+        wave: { x: 0, y: 0, length: 300, lambda: 100, amp: 30, phase: 0, rot: 0, standing: false, axis: true, ...STROKE, width: 2 },
         angle: { x: 0, y: 0, r: 26, a1: 0, a2: 40, label: 'θ', right: false, size: 16, color: INK, width: 1.2 },
         graph: {
             x: 0, y: 0, w: 320, h: 220, xmin: 0, xmax: 10, ymin: 0, ymax: 10,
@@ -408,15 +408,19 @@
         switch (o.type) {
             case 'line': case 'ground': case 'spring':
                 return [{ key: 'p1', x: o.x1, y: o.y1 }, { key: 'p2', x: o.x2, y: o.y2 }];
-            case 'rect': return o.rot ? [] : [{ key: 'se', x: o.x + o.w, y: o.y + o.h }];
+            case 'rect': {
+                // 네 모서리 (돌린 상자도 그 모서리에)
+                const F = frame(o);
+                return [['nw', -.5, -.5], ['ne', .5, -.5], ['se', .5, .5], ['sw', -.5, .5]].map(([key, u, v]) => { const [x, y] = toWorld(F, u, v); return { key, x, y }; });
+            }
             case 'graph': return [{ key: 'se', x: o.x + o.w, y: o.y + o.h }];
-            case 'ellipse': return [{ key: 'r', x: o.cx + o.rx, y: o.cy + o.ry }];
+            case 'ellipse': { const [x, y] = rotPt(o.cx + o.rx, o.cy + o.ry, o.cx, o.cy, o.rot); return [{ key: 'r', x, y }]; }
             case 'polyline': case 'wire': return o.points.map((p, i) => ({ key: 'p' + i, x: p[0], y: p[1] }));
-            case 'wave': return [{ key: 'end', x: o.x + o.length, y: o.y - o.amp }];
+            case 'wave': { const [x, y] = rotPt(o.x + o.length, o.y - o.amp, o.x, o.y, o.rot); return [{ key: 'end', x, y }]; }
             case 'angle': return [
                 { key: 'a1', x: o.x + o.r * Math.cos(rad(o.a1)), y: o.y - o.r * Math.sin(rad(o.a1)) },
                 { key: 'a2', x: o.x + o.r * Math.cos(rad(o.a2)), y: o.y - o.r * Math.sin(rad(o.a2)) }];
-            case 'lens': return [{ key: 'h', x: o.x, y: o.y - o.h / 2 }];
+            case 'lens': { const [x, y] = rotPt(o.x, o.y - o.h / 2, o.x, o.y, o.rot); return [{ key: 'h', x, y }]; }
             case 'mirror': { const [hx, hy] = rotPt(o.x, o.y - o.h / 2, o.x, o.y, o.rot); return [{ key: 'h', x: hx, y: hy }]; }
             case 'comp': { const t = terminals(o)[1]; return [{ key: 'len', x: t[0], y: t[1] }]; }
             default: return [];
@@ -429,10 +433,25 @@
             case 'line': case 'ground': case 'spring':
                 if (key === 'p1') { o.x1 = x; o.y1 = y; } else { o.x2 = x; o.y2 = y; }
                 break;
-            case 'rect': case 'graph': o.w = Math.max(10, x - o.x); o.h = Math.max(10, y - o.y); break;
-            case 'ellipse': o.rx = Math.max(2, Math.abs(x - o.cx)); o.ry = Math.max(2, Math.abs(y - o.cy)); break;
+            case 'graph': o.w = Math.max(10, x - o.x); o.h = Math.max(10, y - o.y); break;
+            case 'rect': {
+                // 맞은편 모서리는 그대로 두고 크기를 바꾼다 (돌린 상자는 상자 방향으로)
+                const su = key.includes('w') ? -1 : 1, sv = key.includes('n') ? -1 : 1;
+                const F = frame(o);
+                const [fx, fy] = toWorld(F, -su / 2, -sv / 2);
+                const [lx, ly] = rotPt(x, y, fx, fy, -o.rot);
+                const w = Math.max(10, (lx - fx) * su), h = Math.max(10, (ly - fy) * sv);
+                const [cx, cy] = rotPt(fx + su * w / 2, fy + sv * h / 2, fx, fy, o.rot);
+                o.w = r2(w); o.h = r2(h); o.x = r2(cx - w / 2); o.y = r2(cy - h / 2);
+                break;
+            }
+            case 'ellipse': {
+                const [lx, ly] = rotPt(x, y, o.cx, o.cy, -o.rot);
+                o.rx = Math.max(2, r2(Math.abs(lx - o.cx))); o.ry = Math.max(2, r2(Math.abs(ly - o.cy)));
+                break;
+            }
             case 'polyline': case 'wire': { const i = +key.slice(1); if (o.points[i]) o.points[i] = [x, y]; break; }
-            case 'wave': o.length = Math.max(10, x - o.x); o.amp = r2(o.y - y); break;
+            case 'wave': { const [lx, ly] = rotPt(x, y, o.x, o.y, -o.rot); o.length = Math.max(10, r2(lx - o.x)); o.amp = r2(o.y - ly); break; }
             case 'angle': {
                 const a = r2(Math.atan2(o.y - y, x - o.x) * 180 / Math.PI);
                 o[key] = a; o.r = Math.max(6, r2(Math.hypot(x - o.x, y - o.y)));
@@ -443,18 +462,51 @@
         }
     }
 
+    // ───────────────────────── 돌리기 ─────────────────────────
+    // 기울기(rot, 시계 방향 °)를 가진 물체와, 점으로 이루어져 점을 돌리는 물체
+    const ROT_TYPES = ['rect', 'ellipse', 'text', 'comp', 'lens', 'mirror', 'wave'];
+    const canRotate = o => ROT_TYPES.includes(o.type) || ['line', 'ground', 'spring', 'polyline', 'wire', 'dot', 'angle'].includes(o.type);
+    const normDeg = d => { d = ((d % 360) + 360) % 360; d = Math.round(d * 100) / 100; return d > 180 ? d - 360 : d; };
+    function pivotOf(o) {
+        switch (o.type) {
+            case 'rect': return [o.x + o.w / 2, o.y + o.h / 2];
+            case 'ellipse': return [o.cx, o.cy];
+            default: return [o.x, o.y];
+        }
+    }
+    // (cx, cy) 를 중심으로 deg 만큼 시계 방향으로 돌린다
+    function rotateObject(o, deg, cx, cy) {
+        if (!canRotate(o) || !deg) return;
+        if (ROT_TYPES.includes(o.type)) {
+            const [px, py] = pivotOf(o);
+            const [nx, ny] = rotPt(px, py, cx, cy, deg);
+            o.rot = normDeg((o.rot || 0) + deg);
+            translate(o, nx - px, ny - py);
+            return;
+        }
+        const R = (x, y) => rotPt(x, y, cx, cy, deg).map(r2);
+        if ('x1' in o) { [o.x1, o.y1] = R(o.x1, o.y1); [o.x2, o.y2] = R(o.x2, o.y2); }
+        else if (o.points) o.points = o.points.map(([x, y]) => R(x, y));
+        else {
+            [o.x, o.y] = R(o.x, o.y);
+            // 각도 표시는 수학 방향(반시계 +)이라 반대로
+            if (o.type === 'angle') { o.a1 = normDeg(o.a1 - deg); o.a2 = normDeg(o.a2 - deg); }
+        }
+    }
+
     // ───────────────────────── 맞추기·연결 ─────────────────────────
     // 물체 기준틀: 점 (u, v) → 화면 = (x, y) + 회전(rot)·(u·sx, v·sy). 선 종류는 기준틀 없이 구간(seg)·비율(t)로 붙인다
     function frame(o) {
         switch (o.type) {
             case 'rect': return { x: o.x + o.w / 2, y: o.y + o.h / 2, rot: o.rot, sx: o.w || 1, sy: o.h || 1 };
-            case 'ellipse': return { x: o.cx, y: o.cy, rot: 0, sx: 2 * o.rx || 1, sy: 2 * o.ry || 1 };
+            case 'ellipse': return { x: o.cx, y: o.cy, rot: o.rot, sx: 2 * o.rx || 1, sy: 2 * o.ry || 1 };
             case 'comp': return { x: o.x, y: o.y, rot: o.rot, sx: o.len, sy: o.len };
-            case 'lens': return { x: o.x, y: o.y, rot: 0, sx: o.h, sy: o.h };
+            case 'lens': return { x: o.x, y: o.y, rot: o.rot, sx: o.h, sy: o.h };
             case 'mirror': return { x: o.x, y: o.y, rot: o.rot, sx: o.h, sy: o.h };
             case 'graph': return { x: o.x, y: o.y, rot: 0, sx: o.w, sy: o.h };
-            case 'wave': return { x: o.x, y: o.y, rot: 0, sx: o.length || 1, sy: 1 };
-            case 'dot': case 'text': case 'angle': return { x: o.x, y: o.y, rot: 0, sx: 1, sy: 1 };
+            case 'wave': return { x: o.x, y: o.y, rot: o.rot, sx: o.length || 1, sy: 1 };
+            case 'text': return { x: o.x, y: o.y, rot: o.rot, sx: 1, sy: 1 };
+            case 'dot': case 'angle': return { x: o.x, y: o.y, rot: 0, sx: 1, sy: 1 };
             default: return null;
         }
     }
@@ -491,22 +543,31 @@
         switch (o.type) {
             case 'line': case 'ground': case 'spring': case 'polyline': case 'wire': return box(linePoints(o));
             case 'rect': return rotBox(frame(o), o.w / 2, o.h / 2);
-            case 'ellipse': return { x1: o.cx - o.rx, y1: o.cy - o.ry, x2: o.cx + o.rx, y2: o.cy + o.ry };
+            case 'ellipse': {
+                const c = Math.cos(rad(o.rot)), sn = Math.sin(rad(o.rot));
+                const hx = Math.hypot(o.rx * c, o.ry * sn), hy = Math.hypot(o.rx * sn, o.ry * c);
+                return { x1: o.cx - hx, y1: o.cy - hy, x2: o.cx + hx, y2: o.cy + hy };
+            }
             case 'comp': return rotBox(frame(o), o.len / 2, 12);
-            case 'lens': { const t = Math.max(8, o.h * 0.09); return { x1: o.x - t, y1: o.y - o.h / 2, x2: o.x + t, y2: o.y + o.h / 2 }; }
+            case 'lens': return rotBox(frame(o), Math.max(8, o.h * 0.09), o.h / 2);
             case 'mirror': return rotBox(frame(o), 4, o.h / 2);
             case 'dot': return { x1: o.x - o.r, y1: o.y - o.r, x2: o.x + o.r, y2: o.y + o.r };
-            case 'wave': { const a = Math.abs(o.amp); return { x1: o.x, y1: o.y - a, x2: o.x + o.length, y2: o.y + a }; }
+            case 'wave': { const a = Math.abs(o.amp); return box([[0, -a], [o.length, -a], [o.length, a], [0, a]].map(([u, v]) => rotPt(o.x + u, o.y + v, o.x, o.y, o.rot))); }
             case 'angle': return { x1: o.x - o.r, y1: o.y - o.r, x2: o.x + o.r, y2: o.y + o.r };
             case 'graph': return { x1: o.x, y1: o.y, x2: o.x + o.w, y2: o.y + o.h };
             case 'text': {
-                const lines = String(o.text).split('\n');
-                const w = Math.max(...lines.map(l => textWidth(l, o.size)));
-                const x1 = o.anchor === 'start' ? o.x : o.anchor === 'end' ? o.x - w : o.x - w / 2;
-                return { x1, y1: o.y - o.size * 0.75, x2: x1 + w, y2: o.y + o.size * 0.25 + (lines.length - 1) * o.size * 1.25 };
+                const b = textLocalBox(o);
+                return box([[b.x1, b.y1], [b.x2, b.y1], [b.x2, b.y2], [b.x1, b.y2]].map(([x, y]) => rotPt(x, y, o.x, o.y, o.rot)));
             }
         }
         return null;
+    }
+    // 돌리기 전 글자 상자
+    function textLocalBox(o) {
+        const lines = String(o.text).split('\n');
+        const w = Math.max(4, ...lines.map(l => textWidth(l, o.size)));
+        const x1 = o.anchor === 'start' ? o.x : o.anchor === 'end' ? o.x - w : o.x - w / 2;
+        return { x1, y1: o.y - o.size * 0.75, x2: x1 + w, y2: o.y + o.size * 0.25 + (lines.length - 1) * o.size * 1.25 };
     }
 
     // 붙기 좋은 점 (끝점·소자 끝·중심·모서리 가운데 등)
@@ -520,7 +581,7 @@
             case 'comp': return terminals(o).concat([[o.x, o.y]]);
             case 'lens': case 'mirror': return [[0, 0], [0, -.5], [0, .5]].map(([u, v]) => toWorld(F, u, v));
             case 'dot': case 'angle': return [[o.x, o.y]];
-            case 'wave': return [[o.x, o.y], [o.x + o.length, o.y]];
+            case 'wave': return [toWorld(F, 0, 0), toWorld(F, 1, 0)];
             case 'graph': return [[o.x, o.y + o.h], [o.x, o.y], [o.x + o.w, o.y + o.h]];
         }
         return [];
@@ -540,7 +601,7 @@
                 let hw = 0.5, hh = 0.5, cu = 0, cv = 0;
                 if (o.type === 'graph') { cu = 0.5; cv = 0.5; }
                 if (o.type === 'text') {
-                    const b = bbox(o);
+                    const b = textLocalBox(o);
                     hw = (b.x2 - b.x1) / 2; hh = (b.y2 - b.y1) / 2; cu = (b.x1 + b.x2) / 2 - o.x; cv = (b.y1 + b.y2) / 2 - o.y;
                 }
                 let a = lu - cu, b = lv - cv;
@@ -930,6 +991,45 @@
         return out;
     }
 
+    // 그래프 값 ↔ 화면 좌표
+    function graphMap(o) {
+        return {
+            X: v => o.x + (v - o.xmin) / (o.xmax - o.xmin) * o.w,
+            Y: v => o.y + o.h - (v - o.ymin) / (o.ymax - o.ymin) * o.h,
+            vx: px => o.xmin + (px - o.x) / o.w * (o.xmax - o.xmin),
+            vy: py => o.ymin + (o.y + o.h - py) / o.h * (o.ymax - o.ymin)
+        };
+    }
+    // 그래프 위에서 점을 끌 때 값을 맞출 간격 (자동 눈금 간격의 절반)
+    function valueStep(o, axis) {
+        const min = o[axis + 'min'], max = o[axis + 'max'];
+        const st = o[axis + 'step'] > 0 ? o[axis + 'step'] : niceStep(max - min, Math.max(2, Math.floor((axis === 'x' ? o.w : o.h) / (axis === 'x' ? 55 : 40))));
+        return st / 2;
+    }
+    const snapValue = (v, step) => +(Math.round(v / step) * step).toFixed(10);
+    const formatPoints = pts => pts.map(p => p.map(v => +(+v).toFixed(6)).join(',')).join('  ');
+
+    // 직접 적는 눈금 "1:*t*_0, 2:2*t*_0" ↔ 표 [{ v: '1', label: '*t*_0' }]
+    function parseTickList(src) {
+        return String(src || '').split(/[,;\n]/).map(t => t.trim()).filter(Boolean).map(t => {
+            const m = /^([^:=]+)[:=](.*)$/.exec(t);
+            return m ? { v: m[1].trim(), label: m[2].trim() } : { v: t, label: '' };
+        });
+    }
+    function formatTickList(rows) {
+        return rows.filter(r => String(r.v).trim() !== '').map(r => r.label ? `${String(r.v).trim()}:${String(r.label).replace(/[,;\n]/g, ' ').trim()}` : String(r.v).trim()).join(', ');
+    }
+
+    // 축 이름이 그려지는 자리 (그림 위에서 두 번 눌러 고칠 때)
+    function graphLabelSpots(o) {
+        const m = graphMap(o);
+        const AX = m.X(o.xmin <= 0 && o.xmax >= 0 ? 0 : o.xmin), AY = m.Y(o.ymin <= 0 && o.ymax >= 0 ? 0 : o.ymin);
+        const ext = o.arrows ? 16 : 0;
+        // 이름 글자의 가운데 (가로축 이름은 화살표 오른쪽에 왼쪽 맞춤으로 그림)
+        const xw = Math.max(12, textWidth(o.xlabel || '', o.size));
+        return { xlabel: [o.x + o.w + ext + 5 + xw / 2, AY], ylabel: [AX, o.y - ext - 7 - o.size * 0.35] };
+    }
+
     function plotPoints(o, pl) {
         if (pl.kind === 'data') return parsePoints(pl.data);
         let fn;
@@ -1033,6 +1133,14 @@
         s += arrowPath([[AX, o.y + o.h], [AX, o.y - ext]], { ...ax, arrow: o.arrows ? 'end' : 'none' });
         if (o.xlabel) s += richText(o.xlabel, o.x + o.w + ext + 5, AY + size * 0.35, { size, anchor: 'start', color: o.color });
         if (o.ylabel) s += richText(o.ylabel, AX, o.y - ext - 7, { size, anchor: 'middle', color: o.color });
+        if (edit) {
+            // 축 이름을 두 번 눌러 고치기 쉽게 그 둘레를 누를 수 있게
+            const sp = graphLabelSpots(o);
+            for (const k of ['xlabel', 'ylabel']) {
+                const w = Math.max(24, textWidth(o[k] || '', size) + 10);
+                s += `<rect x="${f(sp[k][0] - w / 2)}" y="${f(sp[k][1] - size * 0.8)}" width="${f(w)}" height="${f(size * 1.6)}" fill="transparent" class="hit"/>`;
+            }
+        }
         const atOrigin = x0 === 0 && y0 === 0;
         if (o.origin && atOrigin) s += richText(o.origin, AX - 5, AY + size + 1, { size, anchor: 'end', color: o.color });
 
@@ -1098,6 +1206,7 @@
     }
 
     // ───────────────────────── 물체별 그리기 ─────────────────────────
+    const withRot = (rot, px, py, s) => rot ? `<g transform="rotate(${f(rot)} ${f(px)} ${f(py)})">${s}</g>` : s;
     function hitPath(d) { return `<path d="${d}" class="hit" fill="none" stroke="transparent" stroke-width="12"/>`; }
 
     function renderObject(o, edit) {
@@ -1119,14 +1228,13 @@
             }
             case 'rect': {
                 const cx = o.x + o.w / 2, cy = o.y + o.h / 2;
-                let s = `<rect x="${f(o.x)}" y="${f(o.y)}" width="${f(o.w)}" height="${f(o.h)}"${o.r ? ` rx="${f(o.r)}"` : ''} ${fillAttr(o.fill)} ${strokeAttr(o)}${edit ? ' pointer-events="all"' : ''}/>`;
-                if (o.label) s += richText(o.label, cx, cy, { size: o.size, anchor: 'middle', middle: true, color: o.fill === 'black' ? '#fff' : o.color });
-                return o.rot ? `<g transform="rotate(${f(o.rot)} ${f(cx)} ${f(cy)})">${s}</g>` : s;
+                const s = `<rect x="${f(o.x)}" y="${f(o.y)}" width="${f(o.w)}" height="${f(o.h)}"${o.r ? ` rx="${f(o.r)}"` : ''} ${fillAttr(o.fill)} ${strokeAttr(o)}${edit ? ' pointer-events="all"' : ''}/>`;
+                // 안쪽 글자는 상자를 돌려도 바로 선 채로 (시험 그림 관례)
+                return withRot(o.rot, cx, cy, s) + (o.label ? richText(o.label, cx, cy, { size: o.size, anchor: 'middle', middle: true, color: o.fill === 'black' ? '#fff' : o.color }) : '');
             }
             case 'ellipse': {
-                let s = `<ellipse cx="${f(o.cx)}" cy="${f(o.cy)}" rx="${f(o.rx)}" ry="${f(o.ry)}" ${fillAttr(o.fill)} ${strokeAttr(o)}${edit ? ' pointer-events="all"' : ''}/>`;
-                if (o.label) s += richText(o.label, o.cx, o.cy, { size: o.size, anchor: 'middle', middle: true, color: o.fill === 'black' ? '#fff' : o.color });
-                return s;
+                const s = `<ellipse cx="${f(o.cx)}" cy="${f(o.cy)}" rx="${f(o.rx)}" ry="${f(o.ry)}" ${fillAttr(o.fill)} ${strokeAttr(o)}${edit ? ' pointer-events="all"' : ''}/>`;
+                return withRot(o.rot, o.cx, o.cy, s) + (o.label ? richText(o.label, o.cx, o.cy, { size: o.size, anchor: 'middle', middle: true, color: o.fill === 'black' ? '#fff' : o.color }) : '');
             }
             case 'text': {
                 let s = '';
@@ -1136,7 +1244,9 @@
                     const left = o.anchor === 'start' ? o.x - 4 : o.anchor === 'end' ? o.x - w + 4 : o.x - w / 2;
                     s += `<rect x="${f(left)}" y="${f(o.y - o.size * 1.0)}" width="${f(w)}" height="${f(h)}" fill="${o.bg ? '#fff' : 'none'}" ${o.box ? `stroke="${esc(o.color)}" stroke-width="1"` : 'stroke="none"'}/>`;
                 }
-                return s + richText(o.text, o.x, o.y, { size: o.size, anchor: o.anchor, font: o.font, bold: o.bold, color: o.color });
+                s += richText(o.text, o.x, o.y, { size: o.size, anchor: o.anchor, font: o.font, bold: o.bold, color: o.color });
+                if (edit) { const b = textLocalBox(o); s += `<rect x="${f(b.x1)}" y="${f(b.y1)}" width="${f(b.x2 - b.x1)}" height="${f(b.y2 - b.y1)}" fill="transparent" class="hit"/>`; }
+                return withRot(o.rot, o.x, o.y, s);
             }
             case 'dot':
                 return `<circle cx="${f(o.x)}" cy="${f(o.y)}" r="${f(o.r)}" fill="${o.hollow ? '#fff' : esc(o.color)}" stroke="${esc(o.color)}" stroke-width="${o.hollow ? 1.3 : 0}"/>` +
@@ -1186,7 +1296,7 @@
                     const e = t * 1.1, R = (h * h + e * e) / (2 * e);
                     s = `<path d="M${f(o.x - e)} ${f(o.y - h)} H${f(o.x + e)} A${f(R)} ${f(R)} 0 0 0 ${f(o.x + e)} ${f(o.y + h)} H${f(o.x - e)} A${f(R)} ${f(R)} 0 0 0 ${f(o.x - e)} ${f(o.y - h)} Z" ${fillAttr(o.fill)} stroke="${esc(o.color)}" stroke-width="${f(o.width)}"/>`;
                 }
-                return s + (edit ? `<rect x="${f(o.x - 10)}" y="${f(o.y - h)}" width="20" height="${f(o.h)}" fill="transparent" class="hit"/>` : '');
+                return withRot(o.rot, o.x, o.y, s + (edit ? `<rect x="${f(o.x - 10)}" y="${f(o.y - h)}" width="20" height="${f(o.h)}" fill="transparent" class="hit"/>` : ''));
             }
             case 'mirror': {
                 // 가로 0° 기준: 거울면은 세로선, 빗금은 오른쪽(뒤)
@@ -1217,7 +1327,7 @@
                 if (o.axis) s += `<path d="M${f(o.x)} ${f(o.y)} H${f(o.x + o.length)}" stroke="${esc(o.color)}" stroke-width="0.9" stroke-dasharray="4 3" fill="none"/>`;
                 s += `<path d="${pathD(up)}" fill="none" ${strokeAttr(o, 'stroke-linejoin="round"')}/>`;
                 if (o.standing) s += `<path d="${pathD(dn)}" fill="none" ${strokeAttr({ ...o, dash: 'dashed' })}/>`;
-                return s + (edit ? `<rect x="${f(o.x)}" y="${f(o.y - Math.abs(o.amp) - 4)}" width="${f(o.length)}" height="${f(2 * Math.abs(o.amp) + 8)}" fill="transparent" class="hit"/>` : '');
+                return withRot(o.rot, o.x, o.y, s + (edit ? `<rect x="${f(o.x)}" y="${f(o.y - Math.abs(o.amp) - 4)}" width="${f(o.length)}" height="${f(2 * Math.abs(o.amp) + 8)}" fill="transparent" class="hit"/>` : ''));
             }
             case 'angle': {
                 const p = a => [o.x + o.r * Math.cos(rad(a)), o.y - o.r * Math.sin(rad(a))];
@@ -1390,6 +1500,8 @@
         graphTicks, niceStep, plotPoints, renderObject, renderInner, renderSVG,
         encodeMoved, decodeMoved,
         frame, toWorld, toLocal, bbox, snapPoints, nearestOn, linkFor, linkPoint, LINKABLE, endPoint, setEnd,
-        resolveLinks, dependents, snapTargets, snapDelta, snapPointTo, remapCopies
+        resolveLinks, dependents, snapTargets, snapDelta, snapPointTo, remapCopies,
+        ROT_TYPES, canRotate, rotateObject, normDeg, textLocalBox,
+        graphMap, graphLabelSpots, valueStep, snapValue, formatPoints, parseTickList, formatTickList
     };
 });

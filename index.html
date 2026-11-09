@@ -79,11 +79,12 @@
                 <label><input type="checkbox" id="chk-snap" checked> 격자에 맞추기</label>
                 <span class="hint" id="hint">도구를 고르고 그림판에 그리세요.</span>
             </div>
+            <div id="quickbar" class="quickbar"></div>
             <div class="stage" id="stage">
                 <svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg>
             </div>
             <div class="stage-bar small">
-                <span>끌 때 다른 물체에 가까우면 딱 붙음 · <b>Ctrl</b>+끝점 끌기: 물체에 연결(같이 움직임) · <b>Alt</b>+끌기: 붙지 않고 자유롭게 · Ctrl+G 묶기 · Ctrl+Shift+G 풀기 · 두 번 누르기: 묶음 안 하나만 · Delete 지우기 · Ctrl+D 복제 · 방향키 이동 · R 돌리기 · Shift+누르기 여러 개 선택</span>
+                <span>두 번 누르기: 글자 고치기 (Enter 로 끝) · 위쪽 ⟳ 손잡이: 돌리기 (15°씩) · 오른쪽 클릭: 메뉴 · 끌 때 다른 물체에 가까우면 딱 붙음 · <b>Ctrl</b>+끝점 끌기: 물체에 연결(같이 움직임) · <b>Alt</b>+끌기: 붙지 않고 자유롭게 · Ctrl+G 묶기 · Ctrl+Shift+G 풀기 · 두 번 누르기: 묶음 안 하나만 · Delete 지우기 · Ctrl+D 복제 · 방향키 이동 · R 돌리기 · Shift+누르기 여러 개 선택</span>
             </div>
         </section>
 
@@ -206,6 +207,7 @@
     </main>
 </div>
 
+<div id="ctxmenu" class="ctxmenu" hidden></div>
 <script src="js/figure-model.js"></script>
 <script src="js/figure-maker.js"></script>
 </body>

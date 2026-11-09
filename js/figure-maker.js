@@ -20,6 +20,8 @@
         connectMode: false,   // 🔗 단추: Ctrl 없이도 연결 (스마트폰용)
         lastDown: { t: 0, x: 0, y: 0 },
         lastTap: null,        // 두 번 누르기 확인용
+        rotLabel: null,       // 돌리는 중 각도 표시 {x, y, text}
+        inline: null,         // 그림 위 글자 고치기 { ta, id, key, orig }
         undo: [], redo: [], saved: ''
     };
 
@@ -124,6 +126,22 @@
 
     const byId = id => state.scene.objects.find(o => o.id === id);
     const selected = () => state.sel.map(byId).filter(Boolean);
+    const stage = $('stage');
+    // 여러 물체를 감싸는 상자
+    function unionBox(objs) {
+        const bs = objs.map(o => M.bbox(o)).filter(Boolean);
+        if (!bs.length) return null;
+        return { x1: Math.min(...bs.map(b => b.x1)), y1: Math.min(...bs.map(b => b.y1)), x2: Math.max(...bs.map(b => b.x2)), y2: Math.max(...bs.map(b => b.y2)) };
+    }
+    // 그림 좌표 → 그림판(.stage) 안의 화면 위치, k = 화면 px / 그림 px
+    function stagePos(x, y) {
+        const m = svg.getScreenCTM();
+        const pt = svg.createSVGPoint(); pt.x = x; pt.y = y;
+        const c = m ? pt.matrixTransform(m) : pt;
+        const r = stage.getBoundingClientRect();
+        return { left: c.x - r.left + stage.scrollLeft, top: c.y - r.top + stage.scrollTop, k: m ? m.a : 1 };
+    }
+    const groupIds = id => { const g = byId(id) && byId(id).group; return g ? state.scene.objects.filter(o => o.group === g).map(o => o.id) : [id]; };
 
     // ───────────────────────── 그리기 ─────────────────────────
     function gridSvg(W, H) {
@@ -177,7 +195,34 @@
         }
         for (const g of state.guides) s += `<line class="guide" x1="${g.x1}" y1="${g.y1}" x2="${g.x2}" y2="${g.y2}"/>`;
         if (state.snapHint) s += `<circle class="snap-dot${state.linkHint ? ' linking' : ''}" cx="${state.snapHint.x}" cy="${state.snapHint.y}" r="7"/>`;
+        const sel = selected();
+        const m = svg.getScreenCTM(), k = m ? m.a : 1;   // 화면 px 를 그림 px 로 나눌 때
+        // 돌리기 손잡이: 고른 것 위쪽 가운데
+        const rotObjs = sel.filter(M.canRotate);
+        if (state.tool === 'select' && rotObjs.length && (!state.drag || state.drag.kind === 'rotate')) {
+            const b = unionBox(rotObjs);
+            if (b) {
+                const cx = (b.x1 + b.x2) / 2, top = b.y1 - 8 / k, hy = b.y1 - 30 / k;
+                s += `<line class="rot-line" x1="${cx}" y1="${top}" x2="${cx}" y2="${hy}"/>` +
+                    `<circle class="rot-handle" data-rot="1" cx="${cx}" cy="${hy}" r="${7 / k}"><title>끌어서 돌리기 (15°씩, Alt: 자유롭게)</title></circle>`;
+            }
+        }
+        // 그래프를 하나 고르면 점 그래프의 점·표시한 점을 그림 위에서 끌 수 있게
+        if (sel.length === 1 && sel[0].type === 'graph' && !(state.drag && state.drag.kind === 'move')) {
+            const g = sel[0], gm = M.graphMap(g), r = 4.5 / k;
+            g.plots.forEach((pl, pi) => {
+                if (pl.kind !== 'data') return;
+                M.parsePoints(pl.data).forEach((pt, ki) => {
+                    s += `<rect class="gpt" data-gp="${pi}:${ki}" x="${gm.X(pt[0]) - r}" y="${gm.Y(pt[1]) - r}" width="${2 * r}" height="${2 * r}"><title>끌어서 옮기기 · 두 번 누르면 지우기</title></rect>`;
+                });
+            });
+            g.marks.forEach((mk, mi) => {
+                s += `<circle class="gmark" data-gm="${mi}" cx="${gm.X(mk.x)}" cy="${gm.Y(mk.y)}" r="${5 / k}"><title>표시한 점: 끌어서 옮기기</title></circle>`;
+            });
+        }
+        if (state.rotLabel) s += `<text class="rot-label" x="${state.rotLabel.x}" y="${state.rotLabel.y}" font-size="${13 / k}">${state.rotLabel.text}</text>`;
         ov.innerHTML = s;
+        updateQuickbar();
     }
 
     // ───────────────────────── 도구 ─────────────────────────
@@ -185,7 +230,7 @@
     const CLICK_TOOLS = ['text', 'dot', 'comp', 'lens', 'mirror', 'angle'];
     const POINT_TOOLS = ['polyline', 'wire'];
     const HINTS = {
-        select: '눌러 고르고 끌어서 옮기기 · 가까우면 딱 붙음 (Alt: 자유롭게) · 선 끝을 Ctrl+끌기로 물체에 연결',
+        select: '눌러 고르고 끌어서 옮기기 · 두 번 눌러 글자 고치기 · 위쪽 ⟳ 손잡이로 돌리기 (15°씩) · Alt: 자유롭게 · Ctrl+끌기: 연결 · 오른쪽 클릭: 메뉴',
         line: '그림판에서 끌어 직선을 그리세요.', arrow: '끌어서 화살표를 그리세요 (끝 쪽에 화살촉).',
         rect: '끌어서 사각형을 그리세요.', ellipse: '끌어서 원을 그리세요.',
         ground: '끌어서 바닥(빗금)을 그리세요. 빗금 방향은 속성에서 바꿉니다.', spring: '끌어서 용수철을 그리세요.',
@@ -329,6 +374,24 @@
             render();
             return;
         }
+        if (state.inline) stopInline(true);
+        const rotH = e.target.closest && e.target.closest('[data-rot]');
+        if (rotH) {
+            const objs = selected().filter(M.canRotate), b = unionBox(objs);
+            const c = [(b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2];
+            state.drag = {
+                kind: 'rotate', ids: objs.map(o => o.id), c, a0: Math.atan2(p.y - c[1], p.x - c[0]) * 180 / Math.PI,
+                orig: new Map(objs.map(o => [o.id, JSON.stringify(o)]))
+            };
+            render();
+            return;
+        }
+        const gpt = e.target.closest && e.target.closest('[data-gp], [data-gm]');
+        if (gpt && selected().length === 1) {
+            const [pi, ki] = (gpt.dataset.gp || '').split(':').map(Number);
+            state.drag = gpt.dataset.gp != null ? { kind: 'gpoint', id: state.sel[0], pi, ki } : { kind: 'gmark', id: state.sel[0], mi: +gpt.dataset.gm };
+            return;
+        }
         const handle = e.target.closest && e.target.closest('[data-handle]');
         if (handle) {
             const o = byId(handle.dataset.oid);
@@ -344,7 +407,7 @@
         if (CLICK_TOOLS.includes(state.tool)) {
             const o = createAt(state.tool, snapPt(p, e));
             addObject(o, e.shiftKey);
-            if (o.type === 'text') setTimeout(focusFirstText, 0);   // 그림판을 누른 뒤에 글자 칸으로
+            if (o.type === 'text') setTimeout(() => startInline(o, 'text', true), 0);   // 놓자마자 그 자리에서 글자 쓰기
             return;
         }
         // 선택 도구
@@ -413,6 +476,43 @@
             d.applied = { x: dx, y: dy };
             d.moved = true;
             render();
+        } else if (d.kind === 'rotate') {
+            let delta = Math.atan2(p.y - d.c[1], p.x - d.c[0]) * 180 / Math.PI - d.a0;
+            const objs0 = d.ids.map(id => JSON.parse(d.orig.get(id)));
+            const one = objs0.length === 1 && M.ROT_TYPES.includes(objs0[0].type) ? objs0[0] : null;
+            const rot0 = one ? one.rot || 0 : 0;
+            if (freeMove(e)) delta = Math.round(delta);
+            else if (one) delta = Math.round((rot0 + delta) / 15) * 15 - rot0;   // 하나면 기울기를 15° 단위로
+            else delta = Math.round(delta / 15) * 15;
+            // 처음 모양에서 다시 돌려 오차가 쌓이지 않게
+            for (const o0 of objs0) {
+                const i = state.scene.objects.findIndex(o => o.id === o0.id);
+                if (i < 0) continue;
+                M.rotateObject(o0, delta, d.c[0], d.c[1]);
+                state.scene.objects[i] = o0;
+            }
+            relink();
+            d.moved = true;
+            const shown = M.normDeg(rot0 + delta);
+            state.rotLabel = { x: p.x + 12, y: p.y - 10, text: (one ? '' : (shown > 0 ? '+' : '')) + shown + '°' };
+            render();
+        } else if (d.kind === 'gpoint' || d.kind === 'gmark') {
+            const g = byId(d.id);
+            if (!g) return;
+            const gm = M.graphMap(g);
+            let vx = gm.vx(p.x), vy = gm.vy(p.y);
+            if (freeMove(e)) { vx = +vx.toFixed(3); vy = +vy.toFixed(3); }
+            else { vx = M.snapValue(vx, M.valueStep(g, 'x')); vy = M.snapValue(vy, M.valueStep(g, 'y')); }
+            vx = Math.min(g.xmax, Math.max(g.xmin, vx)); vy = Math.min(g.ymax, Math.max(g.ymin, vy));
+            if (d.kind === 'gpoint') {
+                const pl = g.plots[d.pi], pts = pl ? M.parsePoints(pl.data) : [];
+                if (!pts[d.ki]) return;
+                pts[d.ki] = [vx, vy];
+                pl.data = M.formatPoints(pts);
+            } else if (g.marks[d.mi]) { g.marks[d.mi].x = vx; g.marks[d.mi].y = vy; }
+            state.rotLabel = { x: p.x + 10, y: p.y - 10, text: `(${+vx.toFixed(3)}, ${+vy.toFixed(3)})` };
+            d.moved = true;
+            render();
         } else if (d.kind === 'handle') {
             const o = byId(d.id);
             if (!o) return;
@@ -432,7 +532,13 @@
         state.drag = null;
         const linkTo = state.linkHint;
         clearSnap();
+        state.rotLabel = null;
         if (!d) { drawOverlay(); return; }
+        if ((d.kind === 'gpoint') && !d.moved && e && isDoubleTap(e, `gp:${d.id}:${d.pi}:${d.ki}`)) {
+            // 두 번 누른 점은 지움 (점이 하나 남으면 그대로)
+            const pl = byId(d.id).plots[d.pi], pts = M.parsePoints(pl.data);
+            if (pts.length > 1) { pts.splice(d.ki, 1); pl.data = M.formatPoints(pts); d.moved = true; }
+        }
         if (d.kind === 'create') {
             const tool = state.tool;
             const far = Math.hypot(d.b.x - d.a.x, d.b.y - d.a.y) >= 6;
@@ -459,20 +565,92 @@
         }
         if (d.moved) { commit(); buildProps(); }
         render();
-        if (d.kind === 'move' && !d.moved && e && d.ids.length) onTap(e, d.hitId);
+        if (d.kind === 'move' && !d.moved && e && d.ids.length && isDoubleTap(e, d.hitId)) onDoubleTap(byId(d.hitId), d.start);
     }
-    // 두 번 누르기 (끌지 않고 0.4초 안에 같은 곳): 묶음 안의 하나만 고르고, 글자면 글자 칸으로.
-    // 그림판을 누를 때마다 다시 그려서 브라우저의 dblclick 이 오지 않으므로 직접 센다
-    function onTap(e, id) {
+    // 두 번 누르기 (끌지 않고 0.4초 안에 같은 곳). 그림판을 누를 때마다 다시 그려서 브라우저의 dblclick 이 오지 않으므로 직접 센다
+    function isDoubleTap(e, key) {
         const now = Date.now(), last = state.lastTap;
-        state.lastTap = { t: now, x: e.clientX, y: e.clientY, id };
-        if (!last || last.id !== id || now - last.t > 400 || Math.hypot(e.clientX - last.x, e.clientY - last.y) > 8) return;
+        state.lastTap = { t: now, x: e.clientX, y: e.clientY, key };
+        if (!last || last.key !== key || now - last.t > 400 || Math.hypot(e.clientX - last.x, e.clientY - last.y) > 8) return false;
         state.lastTap = null;
-        const o = byId(id);
+        return true;
+    }
+    // 두 번 누른 물체: 묶음 안의 그것 하나만 고르고, 글자가 있으면 그 자리에서 고치기
+    function onDoubleTap(o, p) {
         if (!o) return;
         state.sel = [o.id];
         render(); buildProps();
-        if (o.type === 'text') setTimeout(focusFirstText, 0);
+        if (o.type === 'graph') {
+            // 축 이름 가까이면 이름 고치기, 아니면 점 그래프에 점 더하기
+            const spots = M.graphLabelSpots(o);
+            for (const key of ['xlabel', 'ylabel']) {
+                if (Math.hypot(p.x - spots[key][0], p.y - spots[key][1]) < 30) { startInline(o, key); return; }
+            }
+            addGraphPoint(o, p);
+            return;
+        }
+        const key = INLINE_KEY[o.type];
+        if (key) startInline(o, key);
+    }
+    const INLINE_KEY = { text: 'text', rect: 'label', ellipse: 'label', comp: 'label', angle: 'label' };
+
+    function addGraphPoint(g, p) {
+        const gm = M.graphMap(g);
+        if (p.x < g.x || p.x > g.x + g.w || p.y < g.y || p.y > g.y + g.h) return;
+        const v = [M.snapValue(gm.vx(p.x), M.valueStep(g, 'x')), M.snapValue(gm.vy(p.y), M.valueStep(g, 'y'))];
+        let pl = g.plots.find(q => q.kind === 'data');
+        if (!pl) {
+            pl = { kind: 'data', expr: 'x', data: '', from: null, to: null, style: 'both', color: '#000000', width: 2, dash: 'solid', label: '' };
+            g.plots.push(pl);
+        }
+        const pts = M.parsePoints(pl.data);
+        pts.push(v);
+        pts.sort((a, b) => a[0] - b[0]);
+        pl.data = M.formatPoints(pts);
+        commit(); render(); buildProps();
+    }
+
+    // ───────────────────────── 그림 위에서 글자 고치기 ─────────────────────────
+    function startInline(o, key, isNew) {
+        stopInline(true);
+        if (!o || !(key in o)) return;
+        const b = M.bbox(o), spot = o.type === 'graph' ? M.graphLabelSpots(o)[key] : [(b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2];
+        const pos = stagePos(spot[0], spot[1]);
+        const ta = document.createElement('textarea');
+        ta.className = 'inline-edit';
+        ta.value = o[key] == null ? '' : String(o[key]);
+        ta.rows = Math.max(1, ta.value.split('\n').length);
+        const w = Math.max(140, (b.x2 - b.x1) * pos.k + 40);
+        ta.style.width = w + 'px';
+        ta.style.left = Math.max(stage.scrollLeft + 4, pos.left - w / 2) + 'px';
+        ta.style.top = (pos.top - 18) + 'px';
+        ta.placeholder = '글자 (v_0, x^2, *v* 기울임)';
+        stage.append(ta);
+        state.inline = { ta, id: o.id, key, orig: o[key], isNew };
+        ta.addEventListener('input', () => { const t = byId(o.id); if (t) { t[key] = ta.value; ta.rows = Math.max(1, ta.value.split('\n').length); render(); } });
+        ta.addEventListener('keydown', ev => {
+            // Enter: 끝내기 (글자 물체는 Shift+Enter 로 줄 바꿈), Esc: 취소
+            if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); stopInline(true); }
+            else if (ev.key === 'Escape') { ev.preventDefault(); stopInline(false); }
+        });
+        ta.addEventListener('blur', () => setTimeout(() => { if (state.inline && state.inline.ta === ta) stopInline(true); }, 0));
+        ta.addEventListener('focus', () => { lastTextInput = ta; });
+        updateQuickbar();
+        ta.focus();
+        ta.select();
+    }
+    function stopInline(keep) {
+        const st = state.inline;
+        if (!st) return;
+        state.inline = null;
+        st.ta.remove();
+        const o = byId(st.id);
+        if (o) {
+            if (!keep) o[st.key] = st.orig;
+            // 새로 넣은 글자를 비워 두면 지움
+            if (keep && o.type === 'text' && !String(o.text).trim()) { state.scene.objects = state.scene.objects.filter(x => x !== o); state.sel = []; }
+        }
+        commit(); render(); buildProps();
     }
     svg.addEventListener('pointerup', endDrag);
     svg.addEventListener('pointercancel', endDrag);
@@ -511,12 +689,33 @@
         relink();
         commit(); render(); buildProps();
     }
-    function rotateSel() {
-        let changed = false;
-        for (const o of selected()) {
-            if ('rot' in o) { o.rot = ((o.rot + 90) % 360 + 360) % 360; changed = true; }
+    // 고른 것을 함께 deg 만큼 돌리기 (시계 방향 +)
+    function rotateSel(deg) {
+        const objs = selected().filter(M.canRotate);
+        if (!objs.length) return;
+        const b = unionBox(objs), cx = (b.x1 + b.x2) / 2, cy = (b.y1 + b.y2) / 2;
+        for (const o of objs) M.rotateObject(o, deg == null ? 90 : deg, cx, cy);
+        relink(); commit(); render(); buildProps();
+    }
+    // 여러 개 줄 맞추기: left/center/right/top/middle/bottom
+    function alignSel(mode) {
+        const objs = selected();
+        if (objs.length < 2) return;
+        const U = unionBox(objs);
+        for (const o of objs) {
+            const b = M.bbox(o);
+            if (!b) continue;
+            const dx = mode === 'left' ? U.x1 - b.x1 : mode === 'right' ? U.x2 - b.x2 : mode === 'center' ? (U.x1 + U.x2 - b.x1 - b.x2) / 2 : 0;
+            const dy = mode === 'top' ? U.y1 - b.y1 : mode === 'bottom' ? U.y2 - b.y2 : mode === 'middle' ? (U.y1 + U.y2 - b.y1 - b.y2) / 2 : 0;
+            M.translate(o, dx, dy);
         }
-        if (changed) { relink(); commit(); render(); buildProps(); }
+        relink(); commit(); render(); buildProps();
+    }
+    // 고른 것 중 그 칸이 있는 것에 모두 같은 값
+    function setAll(key, val, only) {
+        let n = 0;
+        for (const o of selected()) if (key in o && (!only || only(o))) { o[key] = val; n++; }
+        if (n) { relink(); commit(); render(); buildProps(); }
     }
     // 묶기·풀기·연결 끊기
     function groupSel() {
@@ -551,10 +750,12 @@
         const tag = (e.target.tagName || '').toLowerCase();
         const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
         const ctrl = e.ctrlKey || e.metaKey;
+        if (!typing) flushProps();
         if (ctrl && e.key.toLowerCase() === 'z' && !typing) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
         if (ctrl && e.key.toLowerCase() === 'y' && !typing) { e.preventDefault(); redo(); return; }
         if (typing) return;
         if (e.key === 'Escape') {
+            hideMenu();
             if (state.poly) { state.poly = null; render(); return; }
             state.sel = []; setTool('select'); buildProps(); return;
         }
@@ -562,7 +763,11 @@
         if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeSel(); return; }
         if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSel(); return; }
         if (ctrl && e.key.toLowerCase() === 'g') { e.preventDefault(); if (e.shiftKey) ungroupSel(); else groupSel(); return; }
-        if (!ctrl && e.key.toLowerCase() === 'r') { rotateSel(); return; }
+        if (!ctrl && e.key.toLowerCase() === 'r') { rotateSel(e.shiftKey ? -90 : 90); return; }
+        if ((e.key === 'Enter' || e.key === 'F2') && state.sel.length === 1) {
+            const o = selected()[0], key = o && INLINE_KEY[o.type];
+            if (key) { e.preventDefault(); startInline(o, key); return; }
+        }
         if (!ctrl && e.key.toLowerCase() === 'v') { setTool('select'); return; }
         const step = e.shiftKey ? GRID : 1;
         const arrows = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
@@ -594,51 +799,58 @@
         resStyle: [['zigzag', '지그재그'], ['box', '네모']]
     };
     const F = (key, label, kind, extra) => ({ key, label, kind, ...(extra || {}) });
-    const STROKE = [F('color', '색', 'color'), F('width', '굵기', 'num', { step: 0.5, min: 0.3 }), F('dash', '선 모양', 'select', { options: OPT.dash })];
     // 두 칸짜리 숫자 (좌표는 ',', 범위는 '~')
     const P = (a, b, label, sep) => F(a, label, 'pair', { keys: [a, b], sep: sep || ',' });
+    // adv: '자세히' 안에 접어 두는 칸 (위치·색처럼 그림 위에서 바꾸거나 잘 안 바꾸는 것)
+    const A = f => ({ ...f, adv: true });
+    const ROT = F('rot', '기울기 (°)', 'num', { step: 15 });
+    const STROKE_ADV = [A(F('color', '색', 'color')), F('width', '굵기', 'num', { step: 0.5, min: 0.3 }), F('dash', '선 모양', 'select', { options: OPT.dash })];
     const FIELDS = {
-        line: [F('arrow', '화살표', 'select', { options: OPT.arrow }), P('x1', 'y1', '시작점'), P('x2', 'y2', '끝점'), ...STROKE],
+        line: [F('arrow', '화살표', 'select', { options: OPT.arrow }), ...STROKE_ADV, A(P('x1', 'y1', '시작점')), A(P('x2', 'y2', '끝점'))],
         polyline: [F('arrow', '화살표', 'select', { options: OPT.arrow }), F('closed', '닫힌 도형', 'check'), F('smooth', '매끄럽게', 'check'),
-            F('fill', '채우기', 'select', { options: OPT.fill, when: o => o.closed }), F('points', '점 (x,y)', 'points'), ...STROKE],
-        wire: [F('points', '점 (x,y)', 'points'), F('color', '색', 'color'), F('width', '굵기', 'num', { step: 0.5 })],
-        rect: [F('label', '안쪽 글자', 'text'), P('x', 'y', '위치'), P('w', 'h', '가로·세로'), F('rot', '기울기 (°)', 'num', { step: 5 }), F('r', '모서리 둥글기', 'num'),
-            F('fill', '채우기', 'select', { options: OPT.fill }), F('size', '글자 크기', 'num'), ...STROKE],
-        ellipse: [F('label', '안쪽 글자', 'text'), P('cx', 'cy', '중심'), P('rx', 'ry', '반지름 (가로·세로)'), F('fill', '채우기', 'select', { options: OPT.fill }), F('size', '글자 크기', 'num'), ...STROKE],
-        text: [F('text', '글자', 'textarea'), P('x', 'y', '위치'), F('size', '크기', 'num'), F('anchor', '맞춤', 'select', { options: OPT.anchor }),
-            F('font', '글꼴', 'select', { options: OPT.font }), F('bold', '굵게', 'check'), F('bg', '흰 바탕 (선 가리기)', 'check'), F('box', '테두리', 'check'), F('color', '색', 'color')],
-        dot: [P('x', 'y', '위치'), F('r', '크기', 'num', { step: 0.5 }), F('hollow', '속 빈 점 (○)', 'check'), F('color', '색', 'color')],
-        ground: [P('x1', 'y1', '시작점'), P('x2', 'y2', '끝점'), F('side', '빗금 쪽', 'select', { options: OPT.side }), F('gap', '빗금 간격', 'num'), F('color', '색', 'color'), F('width', '굵기', 'num', { step: 0.5 })],
-        spring: [P('x1', 'y1', '시작점'), P('x2', 'y2', '끝점'), F('coils', '감은 수', 'num'), F('amp', '폭', 'num'), F('color', '색', 'color'), F('width', '굵기', 'num', { step: 0.5 })],
+            F('fill', '채우기', 'select', { options: OPT.fill, when: o => o.closed }), ...STROKE_ADV, A(F('points', '점 (x,y)', 'points'))],
+        wire: [F('width', '굵기', 'num', { step: 0.5 }), A(F('color', '색', 'color')), A(F('points', '점 (x,y)', 'points'))],
+        rect: [F('label', '안쪽 글자', 'text'), F('fill', '채우기', 'select', { options: OPT.fill }), ROT,
+            A(P('x', 'y', '위치')), A(P('w', 'h', '가로·세로')), A(F('r', '모서리 둥글기', 'num')), A(F('size', '글자 크기', 'num')), ...STROKE_ADV.map(A)],
+        ellipse: [F('label', '안쪽 글자', 'text'), F('fill', '채우기', 'select', { options: OPT.fill }), ROT,
+            A(P('cx', 'cy', '중심')), A(P('rx', 'ry', '반지름 (가로·세로)')), A(F('size', '글자 크기', 'num')), ...STROKE_ADV.map(A)],
+        text: [F('text', '글자', 'textarea'), F('size', '크기', 'num'), F('bold', '굵게', 'check'), F('bg', '흰 바탕 (선 가리기)', 'check'),
+            A(ROT), A(F('anchor', '맞춤', 'select', { options: OPT.anchor })), A(F('font', '글꼴', 'select', { options: OPT.font })), A(F('box', '테두리', 'check')),
+            A(P('x', 'y', '위치')), A(F('color', '색', 'color'))],
+        dot: [F('r', '크기', 'num', { step: 0.5 }), F('hollow', '속 빈 점 (○)', 'check'), A(P('x', 'y', '위치')), A(F('color', '색', 'color'))],
+        ground: [F('side', '빗금 쪽', 'select', { options: OPT.side }), F('width', '굵기', 'num', { step: 0.5 }), A(F('gap', '빗금 간격', 'num')),
+            A(P('x1', 'y1', '시작점')), A(P('x2', 'y2', '끝점')), A(F('color', '색', 'color'))],
+        spring: [F('coils', '감은 수', 'num'), F('amp', '폭', 'num'), A(F('width', '굵기', 'num', { step: 0.5 })),
+            A(P('x1', 'y1', '시작점')), A(P('x2', 'y2', '끝점')), A(F('color', '색', 'color'))],
         comp: [F('kind', '소자', 'select', { options: OPT.comp }), F('label', '이름', 'text'), F('labelSide', '이름 위치', 'select', { options: OPT.labelSide }),
             F('style', '저항 모양', 'select', { options: OPT.resStyle, when: o => o.kind === 'resistor' || o.kind === 'varistor' }),
             F('cells', '전지 개수', 'num', { min: 1, max: 6, when: o => o.kind === 'battery' }),
             F('on', '스위치 닫힘', 'check', { when: o => o.kind === 'switch' }),
-            P('x', 'y', '가운데'), F('rot', '방향', 'select', { options: OPT.rot, num: true }), F('len', '길이 (끝–끝)', 'num'), F('size', '글자 크기', 'num'),
-            F('color', '색', 'color'), F('width', '굵기', 'num', { step: 0.5 })],
-        lens: [F('kind', '종류', 'select', { options: OPT.lens }), F('style', '모양', 'select', { options: OPT.lensStyle }), P('x', 'y', '중심'), F('h', '높이', 'num'),
-            F('fill', '채우기', 'select', { options: OPT.fill, when: o => o.style === 'shape' }), F('color', '색', 'color'), F('width', '굵기', 'num', { step: 0.5 })],
-        mirror: [F('kind', '종류', 'select', { options: OPT.mirror }), P('x', 'y', '중심'), F('h', '높이', 'num'), F('rot', '방향 (°)', 'num', { step: 15 }),
-            F('radius', '곡률 반지름', 'num', { when: o => o.kind !== 'plane' }), F('color', '색', 'color'), F('width', '굵기', 'num', { step: 0.5 })],
-        wave: [P('x', 'y', '시작점'), F('length', '전체 길이', 'num'), F('lambda', '파장', 'num'), F('amp', '진폭', 'num'), F('phase', '위상 (°)', 'num', { step: 15 }),
-            F('axis', '가운데 기준선', 'check'), F('standing', '정상파 (반대 모양 점선)', 'check'), ...STROKE],
-        angle: [F('label', '이름', 'text'), P('x', 'y', '꼭짓점'), F('r', '반지름', 'num'), P('a1', 'a2', '각 (시작·끝, °)', '~'), F('right', '직각 표시 (ㄴ)', 'check'),
-            F('size', '글자 크기', 'num'), F('color', '색', 'color'), F('width', '굵기', 'num', { step: 0.5 })],
+            A(F('rot', '방향 (°)', 'num', { step: 15 })), A(F('len', '길이 (끝–끝)', 'num')), A(P('x', 'y', '가운데')), A(F('size', '글자 크기', 'num')),
+            A(F('color', '색', 'color')), A(F('width', '굵기', 'num', { step: 0.5 }))],
+        lens: [F('kind', '종류', 'select', { options: OPT.lens }), F('style', '모양', 'select', { options: OPT.lensStyle }),
+            F('fill', '채우기', 'select', { options: OPT.fill, when: o => o.style === 'shape' }),
+            A(ROT), A(F('h', '높이', 'num')), A(P('x', 'y', '중심')), A(F('color', '색', 'color')), A(F('width', '굵기', 'num', { step: 0.5 }))],
+        mirror: [F('kind', '종류', 'select', { options: OPT.mirror }), F('radius', '곡률 반지름', 'num', { when: o => o.kind !== 'plane' }),
+            A(F('rot', '방향 (°)', 'num', { step: 15 })), A(F('h', '높이', 'num')), A(P('x', 'y', '중심')), A(F('color', '색', 'color')), A(F('width', '굵기', 'num', { step: 0.5 }))],
+        wave: [F('lambda', '파장', 'num'), F('amp', '진폭', 'num'), F('axis', '가운데 기준선', 'check'), F('standing', '정상파 (반대 모양 점선)', 'check'),
+            A(F('phase', '위상 (°)', 'num', { step: 15 })), A(ROT), A(F('length', '전체 길이', 'num')), A(P('x', 'y', '시작점')), ...STROKE_ADV.map(A)],
+        angle: [F('label', '이름', 'text'), F('right', '직각 표시 (ㄴ)', 'check'), A(P('a1', 'a2', '각 (시작·끝, °)', '~')), A(F('r', '반지름', 'num')),
+            A(P('x', 'y', '꼭짓점')), A(F('size', '글자 크기', 'num')), A(F('color', '색', 'color')), A(F('width', '굵기', 'num', { step: 0.5 }))],
         graph: [
-            F('_h1', '축', 'heading'),
-            F('xlabel', '가로축 이름', 'text'), F('ylabel', '세로축 이름', 'text'), F('origin', '원점 글자', 'text'),
+            F('xlabel', '가로축 이름', 'text'), F('ylabel', '세로축 이름', 'text'),
             P('xmin', 'xmax', '가로 범위', '~'), P('ymin', 'ymax', '세로 범위', '~'),
             F('xtickMode', '가로 눈금', 'select', { options: OPT.tick }), F('xstep', '가로 간격', 'num', { when: o => o.xtickMode === 'auto', help: '0 = 자동' }),
-            F('xticks', '가로 눈금 글자', 'text', { when: o => o.xtickMode === 'custom', placeholder: '1:*t*_0, 2:2*t*_0' }),
+            F('xticks', '가로 눈금 글자', 'ticks', { when: o => o.xtickMode === 'custom' }),
             F('ytickMode', '세로 눈금', 'select', { options: OPT.tick }), F('ystep', '세로 간격', 'num', { when: o => o.ytickMode === 'auto', help: '0 = 자동' }),
-            F('yticks', '세로 눈금 글자', 'text', { when: o => o.ytickMode === 'custom', placeholder: '2:*v*_0' }),
-            F('tickLabels', '눈금 숫자·글자 보이기', 'check'), F('grid', '모눈', 'select', { options: OPT.grid }), F('arrows', '축 끝 화살표', 'check'),
+            F('yticks', '세로 눈금 글자', 'ticks', { when: o => o.ytickMode === 'custom' }),
+            F('grid', '모눈', 'select', { options: OPT.grid }),
             F('plots', '그래프 선', 'list', {
                 add: '＋ 선 더하기', title: i => `선 ${i + 1}`,
                 make: () => ({ kind: 'func', expr: 'x', data: '', from: null, to: null, style: 'line', color: '#000000', width: 2, dash: 'solid', label: '' }),
                 fields: [F('kind', '종류', 'select', { options: OPT.plotKind }),
                     F('expr', 'y =', 'expr', { when: q => q.kind === 'func', placeholder: '예) 2x+1, 3/x, sin(x)' }),
-                    F('data', '점 (x,y)', 'textarea', { when: q => q.kind === 'data', placeholder: '0,0  2,4  6,4  8,0' }),
+                    F('data', '점 (x,y)', 'textarea', { when: q => q.kind === 'data', placeholder: '0,0  2,4  6,4  8,0  (그림 위에서 끌거나, 두 번 눌러 더하기)' }),
                     P('from', 'to', 'x 구간 (비우면 전체)', '~'),
                     F('style', '그리기', 'select', { options: OPT.plotStyle }), F('dash', '선 모양', 'select', { options: OPT.dash }),
                     F('width', '굵기', 'num', { step: 0.5 }), F('label', '선 이름', 'text', { placeholder: 'A, B …' }), F('color', '색', 'color')]
@@ -654,8 +866,8 @@
                 make: () => ({ plot: 1, from: 0, to: 1, fill: 'hatch' }),
                 fields: [F('plot', '몇 번째 선', 'num', { min: 1 }), P('from', 'to', 'x 구간', '~'), F('fill', '채우기', 'select', { options: OPT.shadeFill })]
             }),
-            F('_h2', '위치·모양', 'heading'),
-            P('x', 'y', '위치 (왼쪽 위)'), P('w', 'h', '가로·세로 (px)'), F('size', '글자 크기', 'num'), F('color', '축 색', 'color'), F('width', '축 굵기', 'num', { step: 0.2 })
+            A(F('origin', '원점 글자', 'text')), A(F('tickLabels', '눈금 숫자·글자 보이기', 'check')), A(F('arrows', '축 끝 화살표', 'check')),
+            A(P('x', 'y', '위치 (왼쪽 위)')), A(P('w', 'h', '가로·세로 (px)')), A(F('size', '글자 크기', 'num')), A(F('color', '축 색', 'color')), A(F('width', '축 굵기', 'num', { step: 0.2 }))
         ]
     };
     const TYPE_NAMES = {
@@ -669,9 +881,17 @@
         relink();
         render();
         clearTimeout(propTimer);
-        propTimer = setTimeout(commit, 400);
+        propTimer = setTimeout(flushProps, 400);
         if (rebuild) buildProps();
     }
+    // 속성 칸에서 바꾼 것을 다른 조작보다 먼저 한 단계로 저장 (되돌리기가 섞이지 않게)
+    function flushProps() {
+        if (propTimer === null) return;
+        clearTimeout(propTimer);
+        propTimer = null;
+        commit();
+    }
+    document.addEventListener('pointerdown', e => { if (!$('props').contains(e.target)) flushProps(); }, true);
 
     function el(tag, attrs, ...kids) {
         const n = document.createElement(tag);
@@ -772,6 +992,25 @@
                     row.append(lab, c);
                     break;
                 }
+                case 'ticks': {
+                    // 눈금 표: 값 | 글자. 저장은 "1:*t*_0, 2:2*t*_0" 글 그대로
+                    container.append(el('div', { class: 'field' }, el('label', {}, f.label)));
+                    const rows = M.parseTickList(obj[f.key]);
+                    const save = () => { obj[f.key] = M.formatTickList(rows); after(false); };
+                    const tbl = el('div', { class: 'tick-table' }, el('div', { class: 'tick-head' }, el('span', {}, '값'), el('span', {}, '글자 (예: *t*_0)'), el('span', {})));
+                    rows.forEach((r, i) => {
+                        const v = el('input', { type: 'text', value: r.v, placeholder: '1' });
+                        const l = el('input', { type: 'text', value: r.label, placeholder: '*t*_0' });
+                        v.addEventListener('input', () => { r.v = v.value; save(); });
+                        l.addEventListener('input', () => { r.label = l.value; save(); });
+                        l.addEventListener('focus', () => { lastTextInput = l; });
+                        tbl.append(el('div', { class: 'tick-row' }, v, l, el('button', { class: 'danger small', title: '빼기', onclick: () => { rows.splice(i, 1); save(); after(true); } }, '✕')));
+                    });
+                    const nums = rows.map(r => M.evalConst(r.v)).filter(isFinite);
+                    tbl.append(el('button', { class: 'secondary small', onclick: () => { rows.push({ v: String(nums.length ? Math.max(...nums) + 1 : 1), label: '' }); save(); after(true); } }, '＋ 눈금 더하기'));
+                    container.append(tbl);
+                    continue;
+                }
                 case 'list': {
                     container.append(el('h3', {}, f.label));
                     const box = el('div', { class: 'card-list' });
@@ -807,7 +1046,7 @@
             el('button', { onclick: duplicateSel, title: 'Ctrl+D' }, '⧉ 복제'),
             el('button', { onclick: () => reorder(true) }, '맨 앞으로'),
             el('button', { onclick: () => reorder(false) }, '맨 뒤로'),
-            sel.some(o => o.type === 'comp' || o.type === 'mirror' || o.type === 'rect') ? el('button', { onclick: rotateSel, title: 'R' }, '⟳ 90°') : null,
+            sel.some(M.canRotate) ? el('button', { onclick: () => rotateSel(90), title: 'R (Shift+R: 반대로)' }, '⟳ 90°') : null,
             sel.length > 1 && !(sel[0].group && sel.every(o => o.group === sel[0].group)) ? el('button', { onclick: groupSel, title: 'Ctrl+G' }, '▣ 묶기') : null,
             sel.some(o => o.group) ? el('button', { onclick: ungroupSel, title: 'Ctrl+Shift+G' }, '▢ 묶음 풀기') : null,
             sel.some(o => o.links) ? el('button', { onclick: unlinkSel }, '✂ 연결 끊기') : null,
@@ -822,8 +1061,109 @@
         const o = sel[0];
         box.append(el('div', { class: 'type-title' }, TYPE_NAMES[o.type] || o.type), acts);
         if (linkNote) box.append(linkNote);
-        buildFields(box, o, FIELDS[o.type] || [], rebuild => changed(rebuild));
+        const fields = FIELDS[o.type] || [], after = rebuild => changed(rebuild);
+        buildFields(box, o, fields.filter(f => !f.adv), after);
+        const adv = fields.filter(f => f.adv);
+        if (adv.length) {
+            // 자세히: 펼친 상태는 이 브라우저에 기억
+            const det = el('details', { class: 'adv' }, el('summary', {}, '자세히 (위치·크기·색 등)'));
+            det.open = load(ADV_KEY) === '1';
+            det.addEventListener('toggle', () => store(ADV_KEY, det.open ? '1' : '0'));
+            buildFields(det, o, adv, after);
+            box.append(det);
+        }
     }
+    const ADV_KEY = 'figure-maker-props-adv';
+
+    // ───────────────────────── 고른 물체 옆 빠른 도구 막대 ─────────────────────────
+    const qb = $('quickbar');
+    const first = key => { const o = selected().find(x => key in x); return o ? o[key] : undefined; };
+    function qbtn(label, title, onclick, on) {
+        return el('button', { type: 'button', class: on ? 'on' : '', title, onmousedown: ev => ev.preventDefault(), onclick }, label);
+    }
+    function seg(key, opts, only) {
+        const cur = first(key);
+        return el('span', { class: 'qseg' }, ...opts.map(([v, label, title]) => qbtn(label, title, () => setAll(key, v, only), cur === v)));
+    }
+    function updateQuickbar() {
+        const sel = selected();
+        qb.innerHTML = '';
+        if (!sel.length || state.poly || state.tool !== 'select') {
+            qb.append(el('span', { class: 'qhint' }, '물체를 고르면 여기에 자주 쓰는 도구가 나옵니다 (화살표 모양·굵기·채우기·돌리기·맞춤 등).'));
+            return;
+        }
+        const types = new Set(sel.map(o => o.type)), has = t => types.has(t), add = (...n) => qb.append(...n.filter(Boolean));
+        const lineish = sel.some(o => 'arrow' in o);
+        if (lineish) add(seg('arrow', [['none', '—', '화살표 없음'], ['end', '→', '끝에 화살표'], ['both', '↔', '양쪽'], ['start', '←', '시작 쪽'], ['mid', '⇢', '가운데 (광선)']], o => 'arrow' in o));
+        if (sel.some(o => 'dash' in o)) add(seg('dash', [['solid', '━', '실선'], ['dashed', '┅', '점선'], ['dotted', '┈', '짧은 점선']]));
+        if (sel.some(o => 'width' in o && o.type !== 'graph')) add(seg('width', [[1, '가늘게', '굵기 1'], [1.5, '보통', '굵기 1.5'], [2.5, '굵게', '굵기 2.5']], o => o.type !== 'graph'));
+        if (sel.some(o => 'fill' in o && (o.type !== 'polyline' || o.closed))) {
+            add(seg('fill', [['none', '▢', '채우기 없음'], ['white', '◻', '흰색'], ['lightgray', '▤', '옅은 회색'], ['gray', '■', '회색'], ['hatch', '▨', '빗금']], o => o.type !== 'polyline' || o.closed));
+        }
+        if (has('text') && sel.length === 1) {
+            const t = sel[0];
+            add(el('span', { class: 'qseg' },
+                qbtn('가−', '글자 작게', () => setAll('size', Math.max(8, t.size - 2))),
+                qbtn('가+', '글자 크게', () => setAll('size', t.size + 2)),
+                qbtn('B', '굵게', () => setAll('bold', !t.bold), t.bold),
+                qbtn('바탕', '흰 바탕 (뒤의 선 가리기)', () => setAll('bg', !t.bg), t.bg)));
+        }
+        if (has('comp') && sel.length === 1) {
+            const c = sel[0], s = el('select', { title: '소자 바꾸기' });
+            for (const [v, t] of OPT.comp) s.append(el('option', { value: v }, t));
+            s.value = c.kind;
+            s.addEventListener('change', () => setAll('kind', s.value));
+            add(s);
+        }
+        if (has('graph') && sel.length === 1) {
+            const g = sel[0];
+            add(el('span', { class: 'qseg' },
+                qbtn('＋ 식', '식 그래프 더하기', () => { g.plots.push({ kind: 'func', expr: 'x', data: '', from: null, to: null, style: 'line', color: '#000000', width: 2, dash: 'solid', label: '' }); commit(); render(); buildProps(); }),
+                qbtn('＋ 점', '점 이어 그리기 더하기 (그래프를 두 번 눌러도 점이 생김)', () => addGraphPoint(g, { x: g.x + g.w / 2, y: g.y + g.h / 2 })),
+                qbtn('모눈', '모눈 켜고 끄기', () => setAll('grid', g.grid === 'none' ? 'tick' : g.grid === 'tick' ? 'fine' : 'none'), g.grid !== 'none')));
+        }
+        if (sel.some(M.canRotate)) add(el('span', { class: 'qseg' }, qbtn('⟲', '왼쪽으로 15° (Shift+R: 90°)', () => rotateSel(-15)), qbtn('⟳', '오른쪽으로 15° (R: 90°)', () => rotateSel(15))));
+        if (sel.length > 1) {
+            add(el('span', { class: 'qseg' },
+                qbtn('⫷', '왼쪽 맞춤', () => alignSel('left')), qbtn('⋮', '가로 가운데 맞춤', () => alignSel('center')), qbtn('⫸', '오른쪽 맞춤', () => alignSel('right')),
+                qbtn('⊤', '위 맞춤', () => alignSel('top')), qbtn('⋯', '세로 가운데 맞춤', () => alignSel('middle')), qbtn('⊥', '아래 맞춤', () => alignSel('bottom'))));
+            const grouped = sel[0].group && sel.every(o => o.group === sel[0].group);
+            add(qbtn(grouped ? '▢ 풀기' : '▣ 묶기', grouped ? '묶음 풀기 (Ctrl+Shift+G)' : '묶기 (Ctrl+G)', grouped ? ungroupSel : groupSel));
+        }
+        if (sel.length === 1 && INLINE_KEY[sel[0].type]) add(qbtn('✎', '글자 고치기 (두 번 누르기·Enter)', () => startInline(sel[0], INLINE_KEY[sel[0].type])));
+        add(el('span', { class: 'qseg' }, qbtn('⧉', '복제 (Ctrl+D)', duplicateSel), qbtn('🗑', '지우기 (Delete)', removeSel)));
+    }
+
+    // ───────────────────────── 오른쪽 클릭 메뉴 ─────────────────────────
+    const menu = $('ctxmenu');
+    function hideMenu() { menu.hidden = true; }
+    svg.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        if (state.poly) return;
+        const g = e.target.closest && e.target.closest('[data-id]');
+        const id = g && g.dataset.id;
+        if (id && byId(id) && !state.sel.includes(id)) { state.sel = groupIds(id); render(); buildProps(); }
+        const sel = selected();
+        if (!sel.length) { hideMenu(); return; }
+        const item = (label, fn, cls) => el('button', { type: 'button', class: cls || '', onclick: () => { hideMenu(); fn(); } }, label);
+        menu.innerHTML = '';
+        const grouped = sel.length > 1 && sel[0].group && sel.every(o => o.group === sel[0].group);
+        [
+            sel.length === 1 && INLINE_KEY[sel[0].type] ? item('✎ 글자 고치기', () => startInline(sel[0], INLINE_KEY[sel[0].type])) : null,
+            item('⧉ 복제', duplicateSel),
+            sel.some(M.canRotate) ? item('⟳ 90° 돌리기', () => rotateSel(90)) : null,
+            item('맨 앞으로', () => reorder(true)), item('맨 뒤로', () => reorder(false)),
+            sel.length > 1 && !grouped ? item('▣ 묶기', groupSel) : null,
+            sel.some(o => o.group) ? item('▢ 묶음 풀기', ungroupSel) : null,
+            sel.some(o => o.links) ? item('✂ 연결 끊기', unlinkSel) : null,
+            item('🗑 지우기', removeSel, 'danger')
+        ].filter(Boolean).forEach(b => menu.append(b));
+        menu.hidden = false;
+        menu.style.left = Math.min(e.clientX, innerWidth - menu.offsetWidth - 6) + 'px';
+        menu.style.top = Math.min(e.clientY, innerHeight - menu.offsetHeight - 6) + 'px';
+    });
+    document.addEventListener('pointerdown', e => { if (!menu.hidden && !menu.contains(e.target)) hideMenu(); });
+    stage.addEventListener('scroll', hideMenu);
 
     function focusFirstText() {
         const t = $('props').querySelector('textarea, input[type=text]');
